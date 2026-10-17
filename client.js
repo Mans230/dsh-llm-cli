@@ -20,7 +20,6 @@ window.__ModuleLoader__.load({
     const React = require('react')
 
     const h = (...args) => React.createElement(...args)
-    const SUB = 'A CLI-backed route reports only what its own CLI publishes.'
 
     // Accent palette. These read on both light and dark themes, and the rest of
     // the page leans on currentColor so it follows the app theme.
@@ -30,8 +29,6 @@ window.__ModuleLoader__.load({
       cache: '#a97bff',
       reasoning: '#e9a15a',
       cost: '#e46c8f',
-      grok: '#8ab4ff',
-      opencode: '#5fd0a0',
       warn: '#e9b34a',
       bad: '#e46c6c',
     }
@@ -411,7 +408,7 @@ window.__ModuleLoader__.load({
         rows.push(['Codex', model.id, model.turns || 0, counts(model.inputTokens), counts(model.outputTokens), counts(model.cacheReadTokens), counts(model.totalTokens), codex?.capabilities?.cost === false ? '\u2014' : usd4(model.costUsd)])
       }
       return h(Table, {
-        head: ['Route', 'Model', 'Steps', 'In', 'Out', 'Cache read', 'Total', 'Cost'],
+        head: ['Route', 'Model', 'Turns / steps', 'In', 'Out', 'Cache read', 'Total', 'Cost'],
         rows,
         empty: 'No CLI-recorded model usage yet.',
       })
@@ -443,7 +440,7 @@ window.__ModuleLoader__.load({
           method: 'POST',
           headers: { accept: 'application/json', 'x-llm-cli-update': token },
         })
-          .then((response) => response.json())
+          .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
           .then((result) =>
             setUpdate({
               status: 'ready',
@@ -809,7 +806,7 @@ window.__ModuleLoader__.load({
           empty: 'No turns recorded yet.',
         }),
 
-        h('p', { style: S.note }, data.limitsNotice ?? SUB),
+        h('p', { style: S.note }, data.limitsNotice),
         h('div', { style: S.heading }, 'Plugin version'),
         h(
           'div',
@@ -839,7 +836,7 @@ window.__ModuleLoader__.load({
               { type: 'button', style: S.button, onClick: checkForUpdates },
               update.status === 'checking' ? 'Checking\u2026' : 'Check for updates',
             ),
-            update.data?.canApply && update.data?.updateAvailable
+            update.data?.canApply && update.data?.updateAvailable && update.data?.actionToken
               ? h(
                   'button',
                   { type: 'button', style: { ...S.button, marginLeft: '8px' }, onClick: applyUpdate },

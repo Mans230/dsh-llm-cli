@@ -49,7 +49,13 @@ assertEqual(
 )
 
 const resolved = await adapter.resolveModel('codex', 'gpt-6.1-sol')
-assert(resolved && typeof resolved === 'object', 'resolveModel returns metadata')
+assertEqual(resolved.provider, 'codex', 'resolved metadata names its provider')
+assertEqual(resolved.id, 'gpt-6.1-sol', 'resolved metadata keeps the model id')
+assertEqual(resolved.name, 'gpt-6.1-sol', 'the model name defaults to its id')
+assert(
+  Number.isFinite(resolved.context?.contextWindow) && resolved.context.contextWindow > 0,
+  'resolved metadata carries a positive context window',
+)
 
 const chunks = []
 for await (const chunk of adapter.stream({

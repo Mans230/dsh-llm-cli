@@ -187,7 +187,6 @@ function readGrokModelLimits() {
           : windows[0]
       limits[id] = {
         contextWindow: primary,
-        contextWindows: windows.length > 0 ? windows : primary ? [primary] : [],
         maxOutputTokens:
           typeof info.max_completion_tokens === 'number' && info.max_completion_tokens > 0
             ? info.max_completion_tokens
@@ -242,7 +241,6 @@ function blankCliUsage(source, capabilities) {
     sessionCount: 0,
     models: [],
     daily: [],
-    recentSessions: [],
     note: '',
     mix: tokenMix({}, { cacheInInput: false }),
     capabilities: capabilities ?? { cost: false, rateLimits: false, perStep: false },
@@ -401,7 +399,6 @@ function readGrokCliUsage(dir) {
     sessionCount,
     models,
     daily,
-    recentSessions: sessions.slice(0, 25),
     note: available ? '' : 'no grok session usage recorded yet',
     capabilities: {
       ...empty.capabilities,
@@ -457,7 +454,6 @@ function windowCliUsage(full, sinceMs, what = 'cli', windowDays = 0) {
     totalSessions: full.sessionCount ?? 0,
     models,
     daily,
-    recentSessions: sessions.slice(0, 25),
     // A CLI that could not answer at all keeps its own reason. Otherwise the
     // note names the window, and the window is the one the caller asked for, so
     // it cannot drift into a value like "7.0000183 days".
@@ -685,7 +681,6 @@ function readCodexCliUsage(dir) {
     sessionCount: sessions.length,
     models,
     daily,
-    recentSessions: sessions.slice(0, 25),
     limits,
     contextWindow: lastContextWindow,
     note: sessions.length === 0 ? 'no codex turns recorded yet' : '',
@@ -736,7 +731,6 @@ function toOpencodeCliUsage(stats, args, scopeDays) {
     from: finiteOr(stats?.range?.from, 0),
     to: finiteOr(stats?.range?.to, 0),
     sessions: toCount(stats?.sessions),
-    subagents: toCount(stats?.subagents),
     prompts: toCount(stats?.prompts),
     steps: toCount(stats?.steps),
     inputTokens: toCount(tokens.input),
@@ -748,7 +742,6 @@ function toOpencodeCliUsage(stats, args, scopeDays) {
     mix,
     costUsd: finiteOr(stats?.cost, 0),
     activeDays: toCount(stats?.activeDays),
-    streak: toCount(stats?.streak),
     models,
     daily: (Array.isArray(stats?.activity) ? stats.activity : []).map((entry) => ({
       date: String(entry?.date ?? ''),
@@ -1516,7 +1509,6 @@ class CliAdapter {
       const contextWindow = this.codexLimitsCache.contextWindow ?? route?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
       return {
         contextWindow,
-        contextWindows: [],
         source: this.codexLimitsCache.contextWindow
           ? 'from the codex session rollouts'
           : 'harness default: Codex has not recorded a context window yet',
@@ -1525,7 +1517,6 @@ class CliAdapter {
     if (provider !== 'grok') {
       return {
         contextWindow: route?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-        contextWindows: [],
         source: `harness default: the ${route?.displayName ?? provider} CLI publishes no model limits`,
       }
     }
@@ -1560,14 +1551,11 @@ class CliAdapter {
     const entries = []
     for (const [id, route] of Object.entries(this.config.providers)) {
       let signedIn = null
-      let signInText = ''
       if (this.signIn) {
         try {
-          const status = await this.signIn.status(id)
-          signedIn = status.signedIn
-          signInText = status.text
-        } catch (error) {
-          signInText = String(error?.message ?? error)
+          signedIn = (await this.signIn.status(id)).signedIn
+        } catch {
+          /* a probe that fails leaves the sign-in state unknown */
         }
       }
       const configured = Array.isArray(route.models) ? route.models.filter(Boolean) : []
@@ -1582,8 +1570,6 @@ class CliAdapter {
         id,
         displayName: route.displayName ?? id,
         signedIn,
-        signInText: signInText.slice(0, 400),
-        signInNote: LOGIN[id]?.note ?? '',
         signInOptional: LOGIN[id]?.optional === true,
         bin: Array.isArray(route.bin) ? route.bin[0] : route.bin,
         defaultModel: route.defaultModel,
@@ -2799,7 +2785,7 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans, 
         compact(entry.outputTokens ?? 0),
         entry.costUsd === undefined ? '—' : `$${entry.costUsd.toFixed(4)}`,
         `${((entry.ms ?? 0) / 1000).toFixed(1)}s`,
-        entry.ok ? 'ok' : `<span class="bad">${escapeHtml(entry.error ?? 'failed')}</span>`,
+        entry.ok ? '<span class="ok">ok</span>' : `<span class="bad">${escapeHtml(entry.error ?? 'failed')}</span>`,
       ]),
     )
   const limitRows = (routes ?? [])
@@ -2956,8 +2942,9 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans, 
       ]),
     )
     .join('')
-  const cliModelTable = (heading, rowsHtml, emptyNote) =>
-    `<h2>${heading}</h2><div class="wrap"><table><thead><tr><th>Model</th><th>Steps</th><th>In</th><th>Out</th><th>Cache read</th><th>Total</th><th>Cost</th></tr></thead><tbody>${rowsHtml || `<tr><td colspan="7">${emptyNote}</td></tr>`}</tbody></table></div>`
+  // The unit column is "Steps" only for OpenCode; Grok and Codex count turns.
+  const cliModelTable = (heading, rowsHtml, emptyNote, unit = 'Steps') =>
+    `<h2>${heading}</h2><div class="wrap"><table><thead><tr><th>Model</th><th>${unit}</th><th>In</th><th>Out</th><th>Cache read</th><th>Total</th><th>Cost</th></tr></thead><tbody>${rowsHtml || `<tr><td colspan="7">${emptyNote}</td></tr>`}</tbody></table></div>`
   const cliSections =
     (cliCards.length || planCards.length) > 0
       ? `<h2>CLI-recorded usage</h2><div class="cards">${cliCards.join('')}</div>${
@@ -2965,9 +2952,9 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans, 
         }${grokChart}${codexChart}${opencodeChart}${
           grokModelRows || opencodeModelRows || codexModelRows
             ? `<div class="cli-models">${
-                grokModelRows ? cliModelTable('Grok usage by model', grokModelRows, 'No grok model usage recorded.') : ''
+                grokModelRows ? cliModelTable('Grok usage by model', grokModelRows, 'No grok model usage recorded.', 'Turns') : ''
               }${
-                codexModelRows ? cliModelTable('Codex usage by model', codexModelRows, 'No codex model usage recorded.') : ''
+                codexModelRows ? cliModelTable('Codex usage by model', codexModelRows, 'No codex model usage recorded.', 'Turns') : ''
               }${
                 opencodeModelRows
                   ? cliModelTable('OpenCode usage by model', opencodeModelRows, 'No OpenCode model usage recorded.')
@@ -3230,10 +3217,6 @@ function normalizeConfig(raw) {
       typeof config.codexUsageDir === 'string' && config.codexUsageDir.length > 0
         ? config.codexUsageDir
         : profilePath('.codex', 'sessions'),
-    codexModelsCache:
-      typeof config.codexModelsCache === 'string' && config.codexModelsCache.length > 0
-        ? config.codexModelsCache
-        : profilePath('.codex', 'models_cache.json'),
     // Empty means remote reads are refused; loopback never needs it.
     dashboardToken: typeof config.dashboardToken === 'string' ? config.dashboardToken.trim() : '',
     signInTtlMs:

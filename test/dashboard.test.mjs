@@ -10,7 +10,7 @@ import { mount } from './_harness.mjs'
 import { assert, assertEqual, assertMatch } from './_assert.mjs'
 
 const TOKEN = 'tok_3f9a1c7e5b2d4a80'
-const { root, webRoutes } = mount({
+const { root, webRoutes, adapter } = mount({
   cwd: process.cwd(),
   dashboardToken: TOKEN,
   providers: {
@@ -118,6 +118,15 @@ const paused = await call(html, fakeRequest('/llm-cli/usage?refresh=off'))
 assert(!paused.body.includes('sessionStorage.setItem'), 'a paused page schedules no reload')
 assert(paused.body.includes('auto-refresh is off'), 'the paused page says so')
 assert(paused.body.includes('resume auto-refresh'), 'the paused page offers to resume')
+
+// --- 6. The recent-turns table marks both outcomes, escapes the error, and
+// labels a turn-counting table as turns rather than steps.
+adapter.ledger.record({ at: Date.now() - 2000, ms: 900, provider: 'grok', model: 'grok-4.7', inputTokens: 100, outputTokens: 10, ok: true })
+adapter.ledger.record({ at: Date.now() - 1000, ms: 300, provider: 'grok', model: 'grok-4.7', inputTokens: 0, outputTokens: 0, ok: false, error: 'rate <limited>' })
+const withTurns = await call(html, fakeRequest('/llm-cli/usage'))
+assert(withTurns.body.includes('<span class="ok">ok</span>'), 'a finished turn is marked ok rather than bare text')
+assert(withTurns.body.includes('<span class="bad">rate &lt;limited&gt;</span>'), 'a failed turn is marked and its error escaped')
+assert(withTurns.body.includes('<th>Turns</th>'), 'a table that counts turns says "turns", not "steps"')
 
 rmSync(root, { recursive: true, force: true })
 rmSync(open.root, { recursive: true, force: true })

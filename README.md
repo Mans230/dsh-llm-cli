@@ -229,10 +229,10 @@ builds synthetic Codex rollouts for the usage reader.
 | `test/ledger.test.mjs` | a successful and a failed turn, and the usage ledger |
 | `test/signin.test.mjs` | device-code parsing, `SignInManager`, the auto sign-in error |
 | `test/usage.test.mjs` | Codex rollout reading (tokens, models, days, 5h/weekly limits) and windowing |
-| `test/client.test.mjs` | the browser half rendered against a real payload |
+| `test/client.test.mjs` | the browser half rendered against a real payload, and the update button's gate and both outcomes |
 | `test/failures.test.mjs` | CLI error events, timeouts, plain-text answers, a bad `cwd`, block indices |
 | `test/views.test.mjs` | per-CLI usage rules (step summing, single totals), capabilities, dashes |
-| `test/dashboard.test.mjs` | dashboard authorization (loopback, token, cookie) and the page refresh |
+| `test/dashboard.test.mjs` | dashboard authorization (loopback, token, cookie), the page refresh, and the recent-turn cells |
 | `test/update.test.mjs` | version compare, install detection, a real local git pull, a stub npm |
 | `test/contract.test.mjs` | the manifest and both halves' public exports |
 

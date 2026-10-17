@@ -131,5 +131,4 @@ assert(readFileSync(shared, 'utf8').includes('"version":2'), 'the file is rewrit
 rmSync(shared, { force: true })
 
 rmSync(ledger, { force: true })
-assert(true, 'ledger test')
 console.log('ok  ledger.test')

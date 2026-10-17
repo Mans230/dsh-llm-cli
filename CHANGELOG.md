@@ -6,6 +6,52 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.1]
+
+### Removed
+
+- **Fields the dashboard payload produced that nothing read:** `recentSessions`,
+  `contextWindows`, `signInText`, `signInNote`, `subagents` and `streak`. Each
+  was written into `/llm-cli/usage.json` and into the view the Web client
+  renders, and neither half (nor any test) ever read one. `signInText` also
+  captured CLI output on every route facts refresh for a field nobody used.
+- **The `codexModelsCache` passthrough** in the normalized config. The key is
+  still read from your config when building the Codex model reader; the copy
+  placed on the normalized object had no reader.
+- **Two palette entries** in the browser half (`grok`, `opencode`) that no chart
+  colour lookup referenced.
+- A tautological `assert(true, …)` at the end of the ledger suite, which could
+  never fail and proved nothing.
+
+### Fixed
+
+- **The update button was offered where it could not work.** A remote dashboard
+  reader gets the version check with the action token blanked, and `canApply`
+  stays true, so "Update now" rendered and then silently did nothing. The button
+  now requires the token, exactly like the server-rendered page already did.
+- **A refused update was recorded as a result.** The browser half parsed the
+  response body without checking the status, so a 403 from the token check (or
+  any 5xx) became a "last run" entry instead of an error. It now rejects on a
+  non-2xx response and shows `HTTP <status>`.
+- **A turn-counting table was labelled "Steps".** Grok and Codex report turns,
+  not agent steps; only OpenCode reports steps. The Web client's combined table
+  now says "Turns / steps", and the server-rendered tables name the unit per
+  route.
+- **A finished turn rendered as bare `ok`** while a failed one was red, though
+  the stylesheet already had an `.ok` rule with no markup to match. Both
+  outcomes are marked now.
+
+### Tests
+
+- The browser half's React stub now keeps per-hook state and returns working
+  setters, so a click can be driven: the update button's visibility and both
+  update outcomes (refused and applied) are asserted, and each assertion was
+  verified to fail against the pre-fix code.
+- The dashboard suite records a successful and a failed turn and asserts the
+  marked, escaped result cells and the per-route unit header.
+- `resolveModel`'s assertion checks the metadata it returns instead of only that
+  the result is an object.
+
 ## [0.7.0]
 
 ### Added

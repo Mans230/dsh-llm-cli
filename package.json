@@ -1,6 +1,6 @@
 {
   "name": "dsh-llm-cli",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Model routes for DeepSeek Harness served by agent CLIs installed on the host (the OpenCode CLI, the Grok Build CLI and the OpenAI Codex CLI), with the per-model limits each CLI publishes, a charted usage dashboard (its own usage plus the CLIs' recorded usage), the real Codex 5-hour and weekly subscription limits, and optional usage-plan budgets",
   "keywords": [
     "dsh-plugin",
