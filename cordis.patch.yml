@@ -1,0 +1,14 @@
+# Mounts the llm-cli host plugin: model routes served by the agent CLIs
+# installed on this host (the OpenCode, Grok Build and OpenAI Codex CLIs), plus
+# their limits and usage/rate-limit dashboard.
+#
+# The browser half is discovered through this package's `dsh.client` manifest
+# and `./client` export: it adds the plugin's own page to the Web client's
+# Plugins panel and to Settings.
+#
+# Deployment specifics (workspace path, ledger file, which models each route
+# offers, plan budgets) belong to the profile's own cordis.patch.yml, which
+# overrides this entry by `id` with a complete config block.
+- insert:
+    - id: llm-cli
+      name: dsh-llm-cli

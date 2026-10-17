@@ -1,0 +1,58 @@
+{
+  "name": "dsh-llm-cli",
+  "version": "0.3.0",
+  "description": "Model routes for DeepSeek Harness served by agent CLIs installed on the host (the OpenCode CLI, the Grok Build CLI and the OpenAI Codex CLI), with the per-model limits each CLI publishes, a charted usage dashboard (its own usage plus the CLIs' recorded usage), the real Codex 5-hour and weekly subscription limits, and optional usage-plan budgets",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "llm",
+    "cli",
+    "opencode",
+    "grok",
+    "codex"
+  ],
+  "license": "MIT",
+  "author": "Mans230 (https://github.com/Mans230)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mans230/dsh-llm-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Mans230/dsh-llm-cli/issues"
+  },
+  "homepage": "https://github.com/Mans230/dsh-llm-cli#readme",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test/run.mjs"
+  },
+  "engines": {
+    "node": ">=20.11"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-llm": "*"
+  }
+}

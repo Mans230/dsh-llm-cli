@@ -1,0 +1,15 @@
+# Dependencies (this plugin has none; peers come from the harness)
+node_modules/
+
+# Test artifacts
+.test-ledger.json
+.stub-signed-in
+test/stubs/.stub-signed-in
+
+# Local export bundles
+export/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.log
