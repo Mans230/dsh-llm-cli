@@ -779,10 +779,17 @@ async function readOpencodeCliUsage(route, cwd, timeoutMs, argsOverride, scopeDa
   const args = argsOverride ?? route.statsArgs ?? ['stats', '--json', '--all', '--models', '--cost']
   const { code, stdout, stderr } = await runCapture(route, args, { cwd, timeoutMs })
   const text = stdout.trim()
+  if (code !== 0) {
+    throw new Error((stderr || text).trim().slice(0, 300) || `opencode stats exited ${code}`)
+  }
   if (text.length === 0) {
     throw new Error(`${(stderr || '').trim().slice(0, 300) || `opencode ${args.join(' ')} exited ${code}`}`)
   }
-  return toOpencodeCliUsage(JSON.parse(text), args, scopeDays)
+  const stats = JSON.parse(text)
+  if (!stats?.tokens || !Number.isFinite(stats.tokens.input) || !Number.isFinite(stats.tokens.output)) {
+    throw new Error('opencode stats returned no token counters')
+  }
+  return toOpencodeCliUsage(stats, args, scopeDays)
 }
 
 /**
@@ -1469,7 +1476,7 @@ class CliAdapter {
       try {
         ids = route.readModels()
       } catch (error) {
-        this.ctx.logger?.warn?.(`llm-cli: could not read the model list for route "${provider}": ${error?.message ?? error}`)
+        this.ctx.logger?.warn?.(`llm-cli: could not read the model list for route "${provider}"`)
       }
     } else {
       try {
@@ -1479,7 +1486,7 @@ class CliAdapter {
         })
         ids = route.parseList ? route.parseList(stdout) : []
       } catch (error) {
-        this.ctx.logger?.warn?.(`llm-cli: could not list models for route "${provider}": ${error?.message ?? error}`)
+        this.ctx.logger?.warn?.(`llm-cli: could not list models for route "${provider}"`)
       }
     }
     if (ids.length === 0 && route.defaultModel) ids = [route.defaultModel]
@@ -1678,6 +1685,11 @@ class CliAdapter {
     const route = this.config.providers[provider]
     if (!route) throw new Error(`llm-cli: unknown provider route "${provider}"`)
     const turnStartedAt = Date.now()
+    if (options.signal?.aborted) {
+      this.recordFailure(provider, options.model, turnStartedAt, 'the request was aborted')
+      yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'the request was aborted', code: 'ABORTED' } } }
+      return
+    }
 
     // A missing cwd makes spawn fail with an ENOENT that names the binary, so
     // the turn looks like a missing CLI instead of a bad config path.
@@ -1729,7 +1741,9 @@ class CliAdapter {
     }
     options.signal?.addEventListener('abort', onAbort, { once: true })
 
-    const timeoutMs = route.timeoutMs ?? this.config.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    const timeoutMs = Number.isFinite(route.timeoutMs) && route.timeoutMs > 0
+      ? route.timeoutMs
+      : this.config.timeoutMs
     let timedOut = false
     const timer = timeoutMs ? setTimeout(() => { timedOut = true; child.kill() }, timeoutMs) : undefined
 
@@ -1805,6 +1819,7 @@ class CliAdapter {
       const exit = await closed
 
       if (aborted) {
+        this.recordFailure(provider, options.model, turnStartedAt, 'the request was aborted')
         yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'the request was aborted', code: 'ABORTED' } } }
         return
       }
@@ -1819,6 +1834,13 @@ class CliAdapter {
       // answer, so a timeout read as a short reply instead of a failure.
       if (timedOut) {
         const message = `llm-cli: "${route.displayName}" timed out after ${timeoutMs} ms`
+        this.recordFailure(provider, options.model, turnStartedAt, message)
+        throw new Error(message)
+      }
+
+      if (cliError || (text.length > 0 && exit?.code !== 0)) {
+        const detail = cliError || stderr.trim().slice(0, 500) || 'the CLI did not complete'
+        const message = `llm-cli: "${route.displayName}" failed (exit ${exit?.code ?? 'null'}): ${detail}`
         this.recordFailure(provider, options.model, turnStartedAt, message)
         throw new Error(message)
       }
@@ -1943,6 +1965,7 @@ class SignInManager {
    * prints it, leaving the process waiting for the human to approve.
    */
   async start(provider, signal) {
+    if (signal?.aborted) throw new Error('llm-cli: sign-in was aborted')
     const existing = this.pending.get(provider)
     if (existing) return { url: existing.url, code: existing.code, resumed: true }
     const { route, loginArgs, note } = this.routeFor(provider)
@@ -1961,41 +1984,56 @@ class SignInManager {
     child.stdout?.on('data', collect)
     child.stderr?.on('data', collect)
 
+    let closed = false
     const done = new Promise((resolve) => {
       child.on('close', (code) => resolve({ code, text }))
       child.on('error', (error) => resolve({ code: null, text: `${text}\n${error.message}` }))
+    })
+
+    const entry = { child, done, url: undefined, code: undefined, timer: undefined }
+    this.pending.set(provider, entry)
+    const onAbort = () => this.cancel(provider)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    done.then(() => {
+      closed = true
+      clearTimeout(entry.timer)
+      signal?.removeEventListener('abort', onAbort)
+      if (this.pending.get(provider) === entry) this.pending.delete(provider)
     })
 
     // Poll for the prompt rather than reading one line: the CLI may print the
     // URL and the code on separate writes.
     const deadline = Date.now() + 15000
     let info = parseDeviceInfo(text)
-    while (!info.url && !info.code && Date.now() < deadline && child.exitCode === null) {
+    while (!info.url && !info.code && Date.now() < deadline && !closed && !signal?.aborted) {
       await new Promise((resolve) => setTimeout(resolve, 400))
       info = parseDeviceInfo(text)
     }
 
-    if (child.exitCode !== null && !info.url && !info.code) {
+    if (signal?.aborted) throw new Error('llm-cli: sign-in was aborted')
+    if (closed && !info.url && !info.code) {
       const settled = await done
       throw new Error(`llm-cli: "${provider}" sign-in exited before printing a code: ${settled.text.trim().slice(0, 400)}`)
     }
 
-    // A human may never come back. The device code expires anyway, so the
-    // manager closes its own window instead of leaving the CLI waiting forever.
-    const timer = setTimeout(() => {
-      const entry = this.pending.get(provider)
-      if (!entry || entry.child !== child) return
-      this.pending.delete(provider)
-      if (child.exitCode === null) child.kill()
-    }, this.ttlMs)
-    timer.unref?.()
-
-    this.pending.set(provider, { child, done, url: info.url, code: info.code, timer })
-    const onAbort = () => child.kill()
-    signal?.addEventListener('abort', onAbort, { once: true })
-    done.then(() => signal?.removeEventListener('abort', onAbort))
+    entry.url = info.url
+    entry.code = info.code
+    if (!closed) {
+      entry.timer = setTimeout(() => this.cancel(provider), this.ttlMs)
+      entry.timer.unref?.()
+    }
 
     return { url: info.url, code: info.code, note }
+  }
+
+  /** Close a waiting login when its caller or plugin goes away. */
+  cancel(provider) {
+    const entry = this.pending.get(provider)
+    if (!entry) return false
+    this.pending.delete(provider)
+    clearTimeout(entry.timer)
+    if (entry.child.exitCode === null) entry.child.kill()
+    return true
   }
 
   /** Report whether a started sign-in finished, within a short bound. */
@@ -2702,7 +2740,7 @@ async function describeRoutes(adapter, ledger, days = 0) {
     windowLabel: cliUsage.windowLabel ?? '',
     routes,
     limitsNotice:
-      'A CLI-backed route reports only what its CLI publishes. The Grok CLI persists per-session token and cost accounting locally (read here for its own totals) and caches per-model context limits, but it exposes no subscription quota, no remaining-request count and no reset time, so any "plan" gauge is your own configured budget. The OpenCode CLI publishes per-model limits only through `opencode stats`, which this page also reads. Token counts and cost under "this harness" are measured from this harness\u2019s own turns.',
+      'A CLI-backed route reports only what its CLI publishes. The Grok CLI persists per-session token and cost accounting locally (read here for its own totals) and caches per-model context limits, but it exposes no subscription quota, no remaining-request count and no reset time, so any "plan" gauge is your own configured budget. The OpenCode CLI publishes usage through `opencode stats`, but no model context or output limits; those context windows use the labelled harness default. Token counts and cost under "this harness" are measured from this harness\u2019s own turns.',
   }
 }
 
@@ -3201,7 +3239,7 @@ function normalizeConfig(raw) {
   }
   return {
     cwd: typeof config.cwd === 'string' && config.cwd.length > 0 ? config.cwd : process.cwd(),
-    timeoutMs: typeof config.timeoutMs === 'number' ? config.timeoutMs : DEFAULT_TIMEOUT_MS,
+    timeoutMs: Number.isFinite(config.timeoutMs) && config.timeoutMs > 0 ? config.timeoutMs : DEFAULT_TIMEOUT_MS,
     usageFile:
       typeof config.usageFile === 'string' && config.usageFile.length > 0
         ? config.usageFile
@@ -3258,6 +3296,9 @@ export function apply(ctx, config) {
     return
   }
   const manager = new SignInManager(normalized)
+  ctx.effect?.(() => () => {
+    for (const provider of manager.pending.keys()) manager.cancel(provider)
+  })
   const ledger = new UsageLedger(normalized.usageFile)
   const updates = new UpdateManager(normalized, {
     logger: ctx.logger,
@@ -3273,7 +3314,7 @@ export function apply(ctx, config) {
         if (status.updateAvailable && status.canApply && normalized.autoUpdate === 'apply') {
           const result = await updates.apply()
           ctx.logger?.[result.ok ? 'info' : 'warn']?.(
-            `llm-cli: auto-update ${result.ok ? 'installed' : 'failed'}: ${result.command || result.output}`,
+            `llm-cli: auto-update ${result.ok ? 'installed' : 'failed'}`,
           )
         } else if (status.updateAvailable) {
           ctx.logger?.info?.(`llm-cli: version ${status.latest} is available (this copy is ${status.current})`)
@@ -3438,11 +3479,11 @@ export function apply(ctx, config) {
     child.effect(() => () => {
       for (const dispose of disposers) dispose()
     })
-    ctx.logger?.info?.(`llm-cli: usage dashboard at /llm-cli/usage (ledger ${normalized.usageFile ?? 'memory'})`)
+    ctx.logger?.info?.('llm-cli: usage dashboard at /llm-cli/usage')
   })
 
   ctx.logger?.info?.(
-    `llm-cli: registered routes ${routeNames.join(', ')} (cwd ${normalized.cwd})`,
+    `llm-cli: registered routes ${routeNames.join(', ')}`,
   )
 }
 

@@ -10,7 +10,7 @@ import { mount } from './_harness.mjs'
 import { assert, assertEqual, assertMatch } from './_assert.mjs'
 
 const TOKEN = 'tok_3f9a1c7e5b2d4a80'
-const { root, webRoutes, adapter } = mount({
+const { root, webRoutes, adapter, logs, usageFile } = mount({
   cwd: process.cwd(),
   dashboardToken: TOKEN,
   providers: {
@@ -21,6 +21,7 @@ const { root, webRoutes, adapter } = mount({
 })
 
 const html = webRoutes.find((route) => route.path === '/llm-cli/usage')
+assert(!logs.some((line) => line.includes(usageFile) || line.includes(process.cwd()) || line.includes(TOKEN)), 'mount logs contain no deployment path or dashboard token')
 const json = webRoutes.find((route) => route.path === '/llm-cli/usage.json')
 assert(html && json, 'both dashboard routes are registered')
 

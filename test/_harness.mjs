@@ -14,9 +14,10 @@ export function mount(config = {}) {
   let adapter
   let routes
   const webRoutes = []
+  const logs = []
   apply(
     {
-      logger: { info() {}, warn() {} },
+      logger: { info(message) { logs.push(message) }, warn(message) { logs.push(message) } },
       llm: { registerAdapter: (names, value) => { routes = names; adapter = value } },
       inject: (_deps, cb) =>
         cb({
@@ -33,7 +34,7 @@ export function mount(config = {}) {
     },
     { cwd: root, usageFile, ...config },
   )
-  return { adapter, routes, root, usageFile, webRoutes }
+  return { adapter, routes, root, usageFile, webRoutes, logs }
 }
 
 /** Write a throwaway CLI and return its path. */

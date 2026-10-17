@@ -89,5 +89,28 @@ await new Promise((resolve) => setTimeout(resolve, 700))
 assertEqual(ttl.pending.size, 0, 'the restarted sign-in is closed the same way')
 rmSync(flag, { force: true })
 
+// Completion/cancellation must release a session even when nobody calls settle.
+const unattended = new SignInManager({
+  cwd: here,
+  signInTtlMs: 10000,
+  providers: { grok: { bin: process.execPath, loginArgs: [stub, 'login'], statusArgs: [stub, 'models'] } },
+})
+await unattended.start('grok')
+const finished = unattended.pending.get('grok')
+await finished.done
+await new Promise((resolve) => setTimeout(resolve, 0))
+assertEqual(unattended.pending.size, 0, 'a completed sign-in releases its pending entry without polling')
+rmSync(flag, { force: true })
+await unattended.start('grok')
+const cancelled = unattended.pending.get('grok')
+assertEqual(unattended.cancel('grok'), true, 'cancel closes a waiting sign-in')
+await cancelled.done
+assertEqual(unattended.pending.size, 0, 'cancel releases its pending entry')
+const aborted = new AbortController()
+aborted.abort()
+let abortError
+try { await unattended.start('grok', aborted.signal) } catch (error) { abortError = error.message }
+assertMatch(abortError ?? '', /aborted/, 'a pre-aborted sign-in does not spawn')
+
 rmSync(flag, { force: true })
 console.log('ok  signin.test')

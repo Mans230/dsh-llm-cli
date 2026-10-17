@@ -236,9 +236,18 @@ builds synthetic Codex rollouts for the usage reader.
 | `test/update.test.mjs` | version compare, install detection, a real local git pull, a stub npm |
 | `test/contract.test.mjs` | the manifest and both halves' public exports |
 
-Every suite mounts through `test/_harness.mjs`, which gives it a scratch
-directory and its own ledger path. A test run therefore never writes into the
-ledger of a profile that is running the plugin.
+Every test mount passes its own scratch ledger path; most use
+`test/_harness.mjs`. A test run therefore never writes into the ledger of a
+profile that is running the plugin.
+
+`node test/_audit.mjs probes`, `suites` and `mutations` run the extended audit
+checks. `real` reads host usage and runs one real turn per CLI; `real-sanity`
+cross-checks the source files and runs a raw Codex turn; `clone` downloads and
+tests `origin/main`. Those modes intentionally use host data or the network.
+Logs are written under the system temporary directory in
+`dsh-llm-cli-audit-20261017` (override with `AUDIT_DIR`). Run `real` before
+`probes` to provide its dashboard snapshot. All audit mounts isolate their ledger
+and assert the live ledger remains absent. They refuse to run if it exists.
 
 CI runs the syntax check and the suite on Node 20, 22 and 24
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).

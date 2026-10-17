@@ -38,8 +38,19 @@ for (const symbol of [
   'windowCliUsage',
   'windowGrokUsage',
   'renderUsageHtml',
+  'UpdateManager',
+  'detectInstall',
+  'updateCommand',
+  'compareVersions',
+  'currentVersion',
 ]) {
   assertEqual(typeof host[symbol], 'function', `host exports ${symbol}()`)
 }
+assertEqual(pkg.exports['.'], './index.js', 'host export')
+assertEqual(pkg.exports['./package.json'], './package.json', 'manifest export')
+assertEqual(pkg.engines.node, '>=20.11', 'minimum Node version')
+assertEqual(host.currentVersion(), pkg.version, 'currentVersion reads the manifest')
+for (const file of pkg.files) assert(existsSync(join(root, file)), `packed file ${file} exists`)
+assertEqual(Object.keys(pkg.peerDependencies).sort(), ['@deepseek-ai/cordis', '@deepseek-ai/dsh-llm'], 'host peers')
 
 console.log('ok  contract.test')

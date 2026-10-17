@@ -177,6 +177,45 @@ if (process.platform === 'win32') {
   assertEqual(resolveWindowsShim('/usr/bin/env'), { bin: '/usr/bin/env', prefix: [] }, 'a non-Windows path is left alone')
 }
 
+// Text already emitted does not turn a subsequent process/provider failure into success.
+for (const [label, tail] of [
+  ['exit', "process.stderr.write('late failure');process.exit(7)"],
+  ['event', "console.log(JSON.stringify({type:'error',message:'late failure'}))"],
+]) {
+  setCli('opencode.mjs', `console.log(JSON.stringify({type:'text',part:{text:'partial'}}));${tail}`)
+  const failed = await drain(adapter, turn('opencode', 'm'))
+  assertMatch(failed.error ?? '', /late failure/, `partial text cannot hide a late ${label} failure`)
+  assertEqual(adapter.ledger.summary().recent[0].ok, false, `late ${label} failure is ledgered`)
+}
+
+// An already-cancelled call must never start a CLI, and cancellation is ledgered.
+const controller = new AbortController()
+controller.abort()
+const preAborted = await drain(adapter, { ...turn('opencode', 'm'), signal: controller.signal })
+assertEqual(preAborted.chunks.at(-1)?.reason?.kind, 'aborted', 'an already aborted call finishes aborted')
+assertEqual(textOf(preAborted), '', 'an already aborted call runs no CLI')
+assertEqual(adapter.ledger.summary().recent[0].ok, false, 'an already aborted call is ledgered as failed')
+
+const during = new AbortController()
+const turnsBeforeCancel = adapter.ledger.summary().turns
+setCli('opencode.mjs', "console.log(JSON.stringify({type:'text',part:{text:'partial'}}));setTimeout(()=>{},60000)")
+setTimeout(() => during.abort(), 250)
+const cancelled = await drain(adapter, { ...turn('opencode', 'm'), signal: during.signal })
+assertEqual(cancelled.chunks.at(-1)?.reason?.kind, 'aborted', 'a running call can be cancelled')
+assertEqual(adapter.ledger.summary().turns, turnsBeforeCancel + 1, 'running cancellation creates its own ledger entry')
+assertEqual(adapter.ledger.summary().recent[0].error, 'the request was aborted', 'running cancellation records its reason')
+
+setCli('opencode.mjs', "console.log(JSON.stringify({type:'text',part:{text:'partial'}}));setTimeout(()=>{},1000)")
+const bounded = mount({ timeoutMs: 200, providers: {
+  opencode: { bin: process.execPath, timeoutMs: 0, buildArgs: () => [join(root, 'opencode.mjs')] }, grok: false, codex: false,
+} })
+const invalidTimeout = await drain(bounded.adapter, turn('opencode', 'm'))
+assertMatch(invalidTimeout.error ?? '', /timed out after 200 ms/, 'an invalid route timeout falls back to the finite mount timeout')
+const invalidMount = mount({ timeoutMs: 0, providers: { grok: false, codex: false } })
+assert(invalidMount.adapter.config.timeoutMs > 0, 'zero cannot disable the mount timeout')
+rmSync(bounded.root, { recursive: true, force: true })
+rmSync(invalidMount.root, { recursive: true, force: true })
+
 rmSync(root, { recursive: true, force: true })
 rmSync(slow.root, { recursive: true, force: true })
 rmSync(badCwd.root, { recursive: true, force: true })

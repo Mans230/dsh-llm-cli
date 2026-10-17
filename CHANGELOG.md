@@ -6,6 +6,28 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A CLI that emits partial text and then exits unsuccessfully or reports an
+  error now fails the turn and records the reason, instead of recording success.
+- Already-aborted requests do not launch a CLI; running cancellations record
+  their own failed turn. Invalid or zero timeouts fall back to a positive bound.
+- Completed device sign-ins release their pending entry without polling.
+  Sign-ins can be cancelled explicitly and are closed when the plugin disposes.
+- OpenCode stats refusals and JSON without token counters report unavailable
+  usage with a reason instead of available usage containing fabricated zeroes.
+- Plugin logs no longer include deployment paths or raw CLI/update diagnostics.
+
+### Tests
+
+- Pin the update exports and additional manifest fields in the contract suite;
+  exercise both client slot registrations, disposal and the summary view.
+- Isolate the client suite from installed CLIs using local process fixtures.
+- Add `test/_audit.mjs` for cache variants, scratch-copy mutation checks,
+  concurrent ledger writers, HTTP, readers, real-host and fresh-clone probes.
+  Its `real`, `real-sanity` and `clone` modes intentionally access host data or
+  the network; ordinary `npm test` does not invoke them.
+
 ## [0.7.1]
 
 ### Removed

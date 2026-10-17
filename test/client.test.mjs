@@ -58,7 +58,15 @@ apply(
     usageFile: ledger,
     codexUsageDir: join(root, 'codex', 'sessions'),
     plan: { grok: { weeklyPremium: { usedPercent: 1, resetAt: '2026-10-23T15:13:00Z' } } },
-    providers: { grok: {} },
+    grokUsageDir: join(root, 'empty-grok'),
+    providers: {
+      grok: { bin: process.execPath, models: ['grok-4.7'], statusArgs: ['-e', 'process.exit(0)'] },
+      codex: { bin: process.execPath, models: ['gpt-6.1-sol'], statusArgs: ['-e', 'process.exit(0)'] },
+      opencode: {
+        bin: process.execPath, models: ['opencode/free'], statusArgs: ['-e', 'process.exit(0)'],
+        statsArgs: ['-e', 'console.log(JSON.stringify({tokens:{input:0,output:0},models:[],activity:[]}))'],
+      },
+    },
   },
 )
 
@@ -117,6 +125,19 @@ function loadClient(overrides) {
 const first = loadClient({ 0: { status: 'ready', data: payload } })
 assert(typeof first.exportsObj.apply === 'function', 'the client exports apply')
 assertEqual(first.exportsObj.inject, ['slots'], 'the client injects the slots service')
+const registered = [], disposed = []
+const cleanup = []
+first.exportsObj.apply({
+  effect(fn) { cleanup.push(fn()) },
+  slots: {
+    inject(_slot, fn) { return fn() },
+    register(info, component) { registered.push({ info, component }); return () => disposed.push(info.id) },
+  },
+})
+assertEqual(registered.map(({ info }) => info.name), ['plugins.item', 'settings.section'], 'both browser slots are registered')
+assertEqual(new Set(registered.map(({ info }) => info.id)).size, 2, 'browser slots use distinct ids')
+for (const dispose of cleanup) dispose()
+assertEqual(disposed.length, 2, 'browser slots dispose cleanly')
 
 function render(node) {
   if (node == null || node === false || node === true) return ''
@@ -149,6 +170,9 @@ const walk = (node, found = []) => {
 const buttonNamed = (node, label) => walk(node).find((element) => element.type === 'button' && element.children.includes(label))
 
 const html = pageOf(first)
+first.reset()
+const summaryHtml = render(first.exportsObj.LlmCliPage({ view: 'summary' }))
+assert(summaryHtml.startsWith('<span') && !/<svg|<table/.test(summaryHtml), 'summary is one line without charts or tables')
 const count = (re) => (html.match(re) ?? []).length
 assert(count(/<svg/g) >= 4, `the page renders SVG charts (got ${count(/<svg/g)})`)
 assert(count(/<table/g) >= 3, `the page renders usage tables (got ${count(/<table/g)})`)

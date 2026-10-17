@@ -290,6 +290,19 @@ const routeHtml = renderUsageHtml(
 )
 assert(routeHtml.includes(`<div class="k">Codex (CLI)</div><div class="v">1 turns</div><div class="k">${dash}`), 'a route with no costed turns shows a dash for spend')
 
+// JSON error output from stats is a refusal, not an all-zero usage report.
+const refusedStats = mount({ providers: {
+  opencode: { bin: process.execPath, statsArgs: [join(statsDir, 'refused.mjs')] }, grok: false, codex: false,
+} })
+writeFileSync(join(statsDir, 'refused.mjs'), "console.log(JSON.stringify({error:'stats refused'}));process.exit(1)")
+const refusedUsage = (await refusedStats.adapter.cliUsage()).opencode
+assertEqual(refusedUsage.available, false, 'nonzero stats JSON is unavailable rather than a fake zero')
+assertMatch(refusedUsage.note, /stats refused/, 'stats refusal keeps its own reason')
+writeFileSync(join(statsDir, 'refused.mjs'), "console.log('{}')")
+refusedStats.adapter.cliUsageCache.clear()
+assertEqual((await refusedStats.adapter.cliUsage()).opencode.available, false, 'JSON without counters is not measured zero usage')
+rmSync(refusedStats.root, { recursive: true, force: true })
+
 rmSync(root, { recursive: true, force: true })
 rmSync(statsDir, { recursive: true, force: true })
 rmSync(multi.root, { recursive: true, force: true })
