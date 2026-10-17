@@ -70,5 +70,24 @@ try {
 }
 assert(/sign in|https?:\/\//i.test(autoError ?? ''), `a signed-out turn offers a sign-in path (got: ${autoError})`)
 
+// A sign-in nobody comes back to must not leave the CLI waiting forever. The
+// device code expires anyway, so the manager closes its own window.
+const ttl = new SignInManager({
+  cwd: here,
+  signInTtlMs: 300,
+  providers: { grok: { bin: process.execPath, loginArgs: [stub, 'login'], statusArgs: [stub, 'models'] } },
+})
+rmSync(flag, { force: true })
+const waiting = await ttl.start('grok')
+assert(waiting.code ?? waiting.url, 'the device instruction is returned')
+assertEqual(ttl.pending.size, 1, 'the sign-in waits for a human')
+await new Promise((resolve) => setTimeout(resolve, 700))
+assertEqual(ttl.pending.size, 0, 'the waiting sign-in is closed after its TTL')
+const restarted = await ttl.start('grok')
+assert(!restarted.resumed, 'a closed sign-in can be started again')
+await new Promise((resolve) => setTimeout(resolve, 700))
+assertEqual(ttl.pending.size, 0, 'the restarted sign-in is closed the same way')
+rmSync(flag, { force: true })
+
 rmSync(flag, { force: true })
 console.log('ok  signin.test')

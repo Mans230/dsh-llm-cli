@@ -105,6 +105,11 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
 - `opencodeStats.args` — override the `opencode stats` arguments the dashboard
   runs (default `stats --json --all --models --cost`).
 - `includeSystemPrompt` — also forward the harness system prompt to the CLI.
+- `dashboardToken` — required for a dashboard request from another machine.
+  Loopback needs no token. A token shorter than 16 characters does not count as
+  configured, so a stray `token=1` cannot unlock remote reads.
+- `signInTtlMs` — how long a device-code sign-in may wait for a human before the
+  plugin closes it (default 10 minutes).
 
 ## What it adds
 
@@ -114,7 +119,9 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
 - `/llm-cli/usage` (HTML) and `/llm-cli/usage.json` (JSON) on the harness's own
   web server, backed by the ledger and the CLIs' own usage. A `?days=`/`?hours=`
   query (or the on-page 5h/7d/30d/90d/all buttons) scopes the charts to a
-  trailing window.
+  trailing window. The two endpoints answer this machine only; another host
+  needs `dashboardToken`, presented as `?token=`, an `x-llm-cli-token` header,
+  or the `llm_cli_token` cookie the page sets from a query token.
 - The plugin's page in **two places** in the Web client, both rendering the same
   charted dashboard:
   - **Plugins → Grok + Codex + OpenCode (CLI)** (`client.js`, slot
@@ -204,6 +211,7 @@ builds synthetic Codex rollouts for the usage reader.
 | `test/client.test.mjs` | the browser half rendered against a real payload |
 | `test/failures.test.mjs` | CLI error events, timeouts, plain-text answers, a bad `cwd`, block indices |
 | `test/views.test.mjs` | per-CLI usage rules (step summing, single totals), capabilities, dashes |
+| `test/dashboard.test.mjs` | dashboard authorization (loopback, token, cookie) and the page refresh |
 | `test/contract.test.mjs` | the manifest and both halves' public exports |
 
 Every suite mounts through `test/_harness.mjs`, which gives it a scratch

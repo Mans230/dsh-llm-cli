@@ -13,16 +13,27 @@ export function mount(config = {}) {
   const usageFile = join(root, 'ledger.json')
   let adapter
   let routes
+  const webRoutes = []
   apply(
     {
       logger: { info() {}, warn() {} },
       llm: { registerAdapter: (names, value) => { routes = names; adapter = value } },
-      inject: (_deps, cb) => cb({ tools: { register() {} }, webServer: { register: () => () => {} }, effect() {} }),
+      inject: (_deps, cb) =>
+        cb({
+          tools: { register() {} },
+          webServer: {
+            register: (route) => {
+              webRoutes.push(route)
+              return () => {}
+            },
+          },
+          effect() {},
+        }),
       effect() {},
     },
     { cwd: root, usageFile, ...config },
   )
-  return { adapter, routes, root, usageFile }
+  return { adapter, routes, root, usageFile, webRoutes }
 }
 
 /** Write a throwaway CLI and return its path. */

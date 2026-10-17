@@ -6,6 +6,30 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0]
+
+### Fixed
+
+- **The dashboard is no longer readable from another machine by default.** It
+  carries cost, model names and sign-in state, so a request that does not come
+  from this host now gets `403` unless it presents `dashboardToken` as a query
+  token, an `x-llm-cli-token` header, or the cookie the page sets from a query
+  token. The comparison is timing-safe, a token under 16 characters is treated
+  as unconfigured, and the refusal never echoes payload.
+- **A device-code sign-in that nobody approves is closed.** The CLI used to wait
+  for a human indefinitely. The manager now closes the window after
+  `signInTtlMs` (default 10 minutes) and kills the process.
+- **The dashboard no longer jumps to the top every 20 seconds.** The meta
+  refresh is gone. An inline script saves the scroll position before reloading
+  and restores it after, and `?refresh=off`, or the on-page link, stops the
+  reload entirely.
+
+### Added
+
+- `dashboardToken` and `signInTtlMs` in the plugin config.
+- `test/dashboard.test.mjs` covers the authorization matrix and the refresh
+  behaviour, and the sign-in suite covers the TTL.
+
 ## [0.5.0]
 
 ### Fixed

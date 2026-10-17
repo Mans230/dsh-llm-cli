@@ -29,7 +29,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join } from 'node:path'
 
@@ -49,6 +49,10 @@ const ROUTE_FACTS_TTL_MS = 30 * 1000
 const CLI_USAGE_TTL_MS = 60 * 1000
 /** The Grok CLI records cost in ticks of 1e-10 USD. */
 const TICKS_PER_USD = 1e10
+/** How long a device-code sign-in may wait for a human before it is closed. */
+const DEFAULT_SIGN_IN_TTL_MS = 10 * 60 * 1000
+/** A dashboard token shorter than this is not worth calling a secret. */
+const MIN_DASHBOARD_TOKEN = 16
 
 /** Resolve a path under %APPDATA% without importing when the env var is absent. */
 function appDataPath(...parts) {
@@ -1865,6 +1869,7 @@ class SignInManager {
   constructor(config) {
     this.config = config
     this.pending = new Map()
+    this.ttlMs = Number.isFinite(config?.signInTtlMs) && config.signInTtlMs > 0 ? config.signInTtlMs : DEFAULT_SIGN_IN_TTL_MS
   }
 
   routeFor(provider) {
@@ -1937,7 +1942,17 @@ class SignInManager {
       throw new Error(`llm-cli: "${provider}" sign-in exited before printing a code: ${settled.text.trim().slice(0, 400)}`)
     }
 
-    this.pending.set(provider, { child, done, url: info.url, code: info.code })
+    // A human may never come back. The device code expires anyway, so the
+    // manager closes its own window instead of leaving the CLI waiting forever.
+    const timer = setTimeout(() => {
+      const entry = this.pending.get(provider)
+      if (!entry || entry.child !== child) return
+      this.pending.delete(provider)
+      if (child.exitCode === null) child.kill()
+    }, this.ttlMs)
+    timer.unref?.()
+
+    this.pending.set(provider, { child, done, url: info.url, code: info.code, timer })
     const onAbort = () => child.kill()
     signal?.addEventListener('abort', onAbort, { once: true })
     done.then(() => signal?.removeEventListener('abort', onAbort))
@@ -1955,6 +1970,7 @@ class SignInManager {
     ])
     if (result === undefined) return { pending: true, url: entry.url, code: entry.code }
     this.pending.delete(provider)
+    clearTimeout(entry.timer)
     if (entry.child.exitCode === null) entry.child.kill()
     const status = await this.status(provider)
     return { pending: false, signedIn: status.signedIn, output: result.text.trim().slice(0, 600), code: result.code }
@@ -2207,6 +2223,76 @@ function stamp(at) {
   return new Date(at).toLocaleString('en-GB', { hour12: false })
 }
 
+/** True when the request came from this machine. */
+function isLoopbackRequest(request) {
+  const raw = String(request?.socket?.remoteAddress ?? '')
+  const address = raw.startsWith('::ffff:') ? raw.slice(7) : raw
+  return address === '::1' || address === 'localhost' || address.startsWith('127.')
+}
+
+/** Read a dashboard token from a header, the query string, or the cookie. */
+function tokenFromRequest(request) {
+  const header = request?.headers?.['x-llm-cli-token']
+  if (typeof header === 'string' && header.length > 0) return header
+  let params
+  try {
+    params = new URL(request?.url ?? '', 'http://localhost').searchParams
+  } catch {
+    params = null
+  }
+  const query = params?.get('token')
+  if (query) return query
+  for (const part of String(request?.headers?.cookie ?? '').split(';')) {
+    const trimmed = part.trim()
+    if (!trimmed.startsWith('llm_cli_token=')) continue
+    return decodeURIComponent(trimmed.slice('llm_cli_token='.length))
+  }
+  return ''
+}
+
+/**
+ * The dashboard carries cost, model names and sign-in state. This machine is
+ * always allowed to read it. Anything else needs `dashboardToken`, and only a
+ * token long enough to not be guessed counts as configured.
+ */
+function authorizeDashboard(request, token) {
+  if (isLoopbackRequest(request)) return { ok: true }
+  if (typeof token !== 'string' || token.length < MIN_DASHBOARD_TOKEN) {
+    return {
+      ok: false,
+      reason: `remote dashboard access needs a dashboardToken of ${MIN_DASHBOARD_TOKEN}+ characters in the plugin config`,
+    }
+  }
+  const given = Buffer.from(tokenFromRequest(request))
+  const expected = Buffer.from(token)
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) {
+    return { ok: false, reason: 'a valid dashboard token is required, as ?token=, an x-llm-cli-token header, or the llm_cli_token cookie' }
+  }
+  let fromQuery = false
+  try {
+    fromQuery = new URL(request?.url ?? '', 'http://localhost').searchParams.has('token')
+  } catch {
+    fromQuery = false
+  }
+  return {
+    ok: true,
+    // Remember a token that arrived in the URL so the page's own links work.
+    setCookie: fromQuery
+      ? `llm_cli_token=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/llm-cli`
+      : undefined,
+  }
+}
+
+/** Parse `?refresh=off`, so an operator can stop the page reloading itself. */
+function autoRefreshFromUrl(url) {
+  try {
+    const value = new URL(url ?? '', 'http://localhost').searchParams.get('refresh')
+    return !(value !== null && /^(0|off|false|no|paused)$/i.test(value))
+  } catch {
+    return true
+  }
+}
+
 /** Parse the dashboard's trailing-window query parameter (`?days=7`, `?hours=5`). */
 function windowDaysFromUrl(url) {
   try {
@@ -2298,8 +2384,9 @@ function gaugeHtml(percent, label) {
 }
 
 /** The self-contained usage dashboard page, rendered server-side. */
-function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans) {
+function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans, options = {}) {
   const row = (cells) => `<tr>${cells.map((cell) => `<td>${cell}</td>`).join('')}</tr>`
+  const autoRefresh = options.autoRefresh !== false
   const providerRows = summary.providers
     .map((item) =>
       row([
@@ -2518,6 +2605,12 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans) 
   const windowLabel = cliUsage?.windowLabel ?? windowLabelFor(windowDaysShown)
   const windowLink = (query, text) =>
     `<a href="/llm-cli/usage?${query}" style="color:#6fb3ff">${text}</a>`
+  // The page used to reload every 20 seconds from a meta tag, which threw the
+  // reader back to the top. The script below keeps the scroll position, and
+  // this link turns the reload off entirely.
+  const refreshLink = autoRefresh
+    ? windowLink(`days=${windowDaysShown || 'all'}&refresh=off`, 'pause auto-refresh')
+    : windowLink(`days=${windowDaysShown || 'all'}&refresh=on`, 'resume auto-refresh')
   const windowLinks = [
     windowLink('hours=5', '5h'),
     windowLink('days=7', '7d'),
@@ -2530,7 +2623,6 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans) 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="20">
 <title>CLI provider usage</title>
 <style>
   :root { color-scheme: dark; }
@@ -2563,7 +2655,7 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans) 
 </head>
 <body>
 <h1>CLI provider usage</h1>
-<div class="sub">OpenCode, Grok and Codex CLI usage · ${windowLabel}${opencodeCli?.available && opencodeCli.scopeDays > 0 && opencodeCli.scopeDays > windowDaysShown ? ` (opencode covers ${opencodeCli.scopeDays}d, whole days only)` : ''} · window ${windowLinks} · page refreshes every 20s · <a href="/llm-cli/usage.json?days=${windowDaysShown || 'all'}" style="color:#6fb3ff">JSON</a></div>
+<div class="sub">OpenCode, Grok and Codex CLI usage · ${windowLabel}${opencodeCli?.available && opencodeCli.scopeDays > 0 && opencodeCli.scopeDays > windowDaysShown ? ` (opencode covers ${opencodeCli.scopeDays}d, whole days only)` : ''} · window ${windowLinks} · ${autoRefresh ? 'refreshes every 20s and keeps your place' : 'auto-refresh is off'} · ${refreshLink} · <a href="/llm-cli/usage.json?days=${windowDaysShown || 'all'}" style="color:#6fb3ff">JSON</a></div>
 <div class="cards">
   <div class="card"><div class="k">Turns recorded</div><div class="v">${summary.turns}</div></div>
   <div class="card"><div class="k">Total spend</div><div class="v">$${summary.providers.reduce((sum, item) => sum + item.costUsd, 0).toFixed(4)}</div></div>
@@ -2595,6 +2687,24 @@ ${notice ? `<p class="note">${escapeHtml(notice)}</p>` : ''}
 <tbody>${recentRows || '<tr><td colspan="8">No turns recorded yet.</td></tr>'}</tbody>
 </table></div>
 <footer>Ledger: <code>${escapeHtml(summary.ledgerFile ?? 'in memory only')}</code> · rendered ${escapeHtml(stamp(generatedAt))}</footer>
+${
+  autoRefresh
+    ? `<script>
+  (() => {
+    const key = 'llm-cli:scroll'
+    const saved = sessionStorage.getItem(key)
+    if (saved !== null) {
+      window.scrollTo(0, Number(saved) || 0)
+      sessionStorage.removeItem(key)
+    }
+    setTimeout(() => {
+      sessionStorage.setItem(key, String(window.scrollY))
+      location.reload()
+    }, 20000)
+  })()
+</script>`
+    : ''
+}
 </body>
 </html>
 `
@@ -2713,6 +2823,12 @@ function normalizeConfig(raw) {
       typeof config.codexModelsCache === 'string' && config.codexModelsCache.length > 0
         ? config.codexModelsCache
         : profilePath('.codex', 'models_cache.json'),
+    // Empty means remote reads are refused; loopback never needs it.
+    dashboardToken: typeof config.dashboardToken === 'string' ? config.dashboardToken.trim() : '',
+    signInTtlMs:
+      Number.isFinite(config.signInTtlMs) && config.signInTtlMs > 0
+        ? config.signInTtlMs
+        : DEFAULT_SIGN_IN_TTL_MS,
     providers,
   }
 }
@@ -2741,28 +2857,44 @@ export function apply(ctx, config) {
   // The dashboard rides the harness web server, so it answers on whatever
   // address the GUI already serves — no extra port or firewall rule.
   ctx.inject(['webServer'], (child) => {
+    // This machine may always read the dashboard. Any other caller needs the
+    // configured token, so a LAN-bound harness does not publish cost data.
+    const guard = (handler) => async (request, response) => {
+      const auth = authorizeDashboard(request, normalized.dashboardToken)
+      if (!auth.ok) {
+        response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+        response.end(`llm-cli: ${auth.reason}\n`)
+        return
+      }
+      if (auth.setCookie) response.setHeader?.('set-cookie', auth.setCookie)
+      return handler(request, response)
+    }
     const disposers = [
       child.webServer.register({
         kind: 'exact',
         path: '/llm-cli/usage',
-        handler: async (request, response) => {
+        handler: guard(async (request, response) => {
           try {
             const payload = await describeRoutes(adapter, ledger, windowDaysFromUrl(request?.url))
             response.writeHead(200, {
               'content-type': 'text/html; charset=utf-8',
               'cache-control': 'no-store',
             })
-            response.end(renderUsageHtml(payload, Date.now(), payload.routes, payload.limitsNotice, payload.cliUsage, payload.plans))
+            response.end(
+              renderUsageHtml(payload, Date.now(), payload.routes, payload.limitsNotice, payload.cliUsage, payload.plans, {
+                autoRefresh: autoRefreshFromUrl(request?.url),
+              }),
+            )
           } catch (error) {
             response.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
             response.end(`llm-cli: could not build the usage view: ${String(error?.message ?? error)}`)
           }
-        },
+        }),
       }),
       child.webServer.register({
         kind: 'exact',
         path: '/llm-cli/usage.json',
-        handler: async (request, response) => {
+        handler: guard(async (request, response) => {
           try {
             const payload = await describeRoutes(adapter, ledger, windowDaysFromUrl(request?.url))
             response.writeHead(200, {
@@ -2774,7 +2906,7 @@ export function apply(ctx, config) {
             response.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
             response.end(JSON.stringify({ error: String(error?.message ?? error) }))
           }
-        },
+        }),
       }),
     ]
     child.effect(() => () => {
