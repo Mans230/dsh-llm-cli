@@ -22,6 +22,8 @@ All notable changes to this plugin are documented here. The format follows
 - `autoUpdate` (`false`, `'check'` or `'apply'`), `updateIntervalMs`,
   `updateSource` and `updateInstall`. The default makes no network calls, so the
   version check happens only when you ask for it.
+- `currentVersion` is exported, and an `UpdateManager` built directly falls back
+  to the default source instead of requiring one.
 - `test/update.test.mjs` covers version comparison, install detection, a real
   local `git pull` through the update path, and the npm command shape.
 

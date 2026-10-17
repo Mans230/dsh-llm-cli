@@ -2466,6 +2466,8 @@ function runUpdateCommand(command) {
 class UpdateManager {
   constructor(config, options = {}) {
     this.config = config
+    // A direct construction should not have to know the default source.
+    this.source = options.source ?? config?.updateSource ?? UPDATE_SOURCE
     this.install = options.install ?? detectInstall()
     this.logger = options.logger
     this.actionToken = randomUUID()
@@ -2484,7 +2486,7 @@ class UpdateManager {
     if (this.pending) return this.pending
     this.pending = (async () => {
       try {
-        const response = await fetch(this.config.updateSource, {
+        const response = await fetch(this.source, {
           signal: AbortSignal.timeout(10000),
           headers: { accept: 'application/json' },
         })
@@ -3466,6 +3468,7 @@ export {
   buildTools,
   compareVersions,
   computePlans,
+  currentVersion,
   describeRoutes,
   detectInstall,
   parseDeviceInfo,
