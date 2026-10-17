@@ -1466,8 +1466,9 @@ class CliAdapter {
   async listModels(provider) {
     const route = this.config.providers[provider]
     if (!route) return []
-    if (Array.isArray(route.models) && route.models.length > 0) {
-      return route.models.map((id) => ({ provider, id, name: id }))
+    const configured = modelEntries(route.models)
+    if (configured.length > 0) {
+      return configured.map((entry) => ({ provider, id: entry.id, name: entry.name ?? entry.id }))
     }
     const cached = this.listCache.get(provider)
     if (cached && Date.now() - cached.at < LIST_TTL_MS) return cached.models
@@ -1502,6 +1503,12 @@ class CliAdapter {
    */
   limitsFor(provider, model) {
     const route = this.config.providers[provider]
+    // A profile may state one model's limits where its CLI publishes none
+    // (OpenCode prints ids only). A configured entry wins over every probe.
+    const configured = modelEntries(route?.models).find((entry) => entry.id === model)
+    const configuredContext = configured?.contextWindow
+    const configuredMax = configured?.maxOutputTokens
+    const maxField = configuredMax === undefined ? {} : { maxOutputTokens: configuredMax }
     if (provider === 'codex') {
       const now = Date.now()
       if (!this.codexLimitsCache || now - this.codexLimitsCache.at > LIMITS_TTL_MS) {
@@ -1513,18 +1520,27 @@ class CliAdapter {
         }
         this.codexLimitsCache = { at: now, contextWindow }
       }
-      const contextWindow = this.codexLimitsCache.contextWindow ?? route?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
+      const contextWindow =
+        configuredContext ?? this.codexLimitsCache.contextWindow ?? route?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
       return {
         contextWindow,
-        source: this.codexLimitsCache.contextWindow
-          ? 'from the codex session rollouts'
-          : 'harness default: Codex has not recorded a context window yet',
+        ...maxField,
+        source:
+          configuredContext !== undefined
+            ? 'configured for this model'
+            : this.codexLimitsCache.contextWindow
+              ? 'from the codex session rollouts'
+              : 'harness default: Codex has not recorded a context window yet',
       }
     }
     if (provider !== 'grok') {
       return {
-        contextWindow: route?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-        source: `harness default: the ${route?.displayName ?? provider} CLI publishes no model limits`,
+        contextWindow: configuredContext ?? route?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+        ...maxField,
+        source:
+          configuredContext !== undefined
+            ? 'configured for this model'
+            : `harness default: the ${route?.displayName ?? provider} CLI publishes no model limits`,
       }
     }
     const now = Date.now()
@@ -1533,13 +1549,20 @@ class CliAdapter {
     }
     const byModel = this.limitsCache.byModel
     const found = byModel[model]
-    if (found) return found
+    if (found) {
+      return configuredContext === undefined
+        ? { ...found, ...maxField }
+        : { ...found, contextWindow: configuredContext, ...maxField, source: 'configured for this model' }
+    }
     return {
-      contextWindow: route?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      contextWindow: configuredContext ?? route?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      ...maxField,
       source:
-        Object.keys(byModel).length === 0
-          ? 'grok models cache unavailable: sign in with the grok CLI to refresh it'
-          : 'this model is not in the grok models cache',
+        configuredContext !== undefined
+          ? 'configured for this model'
+          : Object.keys(byModel).length === 0
+            ? 'grok models cache unavailable: sign in with the grok CLI to refresh it'
+            : 'this model is not in the grok models cache',
     }
   }
 
@@ -1564,8 +1587,8 @@ class CliAdapter {
           /* a probe that fails leaves the sign-in state unknown */
         }
       }
-      const configured = Array.isArray(route.models) ? route.models.filter(Boolean) : []
-      let models = configured
+      const configured = modelEntries(route.models)
+      let models = configured.map((entry) => entry.id)
       if (models.length === 0) {
         // No model filter is configured, so the route offers whatever the CLI
         // lists (listModels already falls back to the default model).
@@ -3202,6 +3225,39 @@ function buildTools(manager) {
       },
     },
   ]
+}
+
+/**
+ * Normalize a route's configured `models` list.
+ *
+ * A `models` entry is either a bare id (the original shape) or an object that
+ * also states that model's limits. The object form exists for routes whose CLI
+ * publishes ids but no limits — OpenCode is the one shipped today — so a
+ * profile can state a real context window instead of accepting the harness
+ * default for every model on the route.
+ *
+ * @param {unknown} models - the raw `providers.<id>.models` value.
+ * @returns {{id: string, name?: string, contextWindow?: number, maxOutputTokens?: number}[]}
+ */
+function modelEntries(models) {
+  if (!Array.isArray(models)) return []
+  const entries = []
+  for (const entry of models) {
+    if (typeof entry === 'string') {
+      if (entry.length > 0) entries.push({ id: entry })
+      continue
+    }
+    if (!entry || typeof entry !== 'object' || typeof entry.id !== 'string' || entry.id.length === 0) continue
+    entries.push({
+      id: entry.id,
+      ...(typeof entry.name === 'string' && entry.name.length > 0 ? { name: entry.name } : {}),
+      ...(Number.isFinite(entry.contextWindow) && entry.contextWindow > 0 ? { contextWindow: entry.contextWindow } : {}),
+      ...(Number.isFinite(entry.maxOutputTokens) && entry.maxOutputTokens > 0
+        ? { maxOutputTokens: entry.maxOutputTokens }
+        : {}),
+    })
+  }
+  return entries
 }
 
 /** Merge configured routes over the built-in defaults. */
