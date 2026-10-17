@@ -4,6 +4,7 @@
  * Routes:
  *   opencode  -> the OpenCode CLI  (`opencode run --model <m> --format json`)
  *   grok      -> the Grok Build CLI (`grok -p <prompt> -m <m> --output-format streaming-json`)
+ *   codex     -> the OpenAI Codex CLI (`codex exec --json -m <m> <prompt>`)
  *
  * The CLI owns authentication and model access; this adapter only maps the
  * harness message/stream vocabulary onto one headless CLI turn. The CLI agent
@@ -14,7 +15,7 @@
  */
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 
@@ -439,6 +440,71 @@ function normalizeCodexLimit(limit, atMs) {
   }
 }
 
+const ROLLOUT_CACHE_MAX = 2000
+/** file path -> { key: `<mtimeMs>:<size>`, value: parsed rollout } */
+const rolloutCache = new Map()
+
+/**
+ * Parsing a rollout is pure work over an immutable file, so the result is
+ * cached against its size and mtime. The dashboard walks the same history on
+ * every refresh, and re-parsing it made the cost of a page load grow with the
+ * account's lifetime usage.
+ */
+function parseRollout(file) {
+  let key
+  try {
+    const stat = statSync(file)
+    key = `${stat.mtimeMs}:${stat.size}`
+  } catch {
+    key = null
+  }
+  const cached = key ? rolloutCache.get(file) : undefined
+  if (cached && cached.key === key) return cached.value
+
+  let text
+  try {
+    text = readFileSync(file, 'utf8')
+  } catch {
+    return null
+  }
+  const value = { sessionId: '', model: '', endedAt: 0, sessionTotals: null, rate: null, contextWindow: undefined, days: [] }
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (trimmed.length === 0 || trimmed[0] !== '{') continue
+    let event
+    try {
+      event = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    const at = Date.parse(event?.timestamp ?? '') || 0
+    if (at > value.endedAt) value.endedAt = at
+    const payload = event?.payload
+    if (event?.type === 'session_meta') {
+      if (typeof payload?.id === 'string') value.sessionId = payload.id
+      if (typeof payload?.model === 'string' && payload.model) value.model = payload.model
+    } else if (event?.type === 'turn_context') {
+      if (typeof payload?.model === 'string' && payload.model) value.model = payload.model
+    } else if (event?.type === 'event_msg' && payload?.type === 'token_count') {
+      const info = payload.info
+      const cumulative = info?.total_token_usage
+      if (cumulative && typeof cumulative === 'object') value.sessionTotals = codexUsage(cumulative)
+      const contextWindow = firstNumber(info?.model_context_window, info?.modelContextWindow)
+      if (contextWindow !== undefined) value.contextWindow = contextWindow
+      const perTurn = info?.last_token_usage
+      if (perTurn && typeof perTurn === 'object') {
+        value.days.push({ date: new Date(at || Date.now()).toISOString().slice(0, 10), usage: codexUsage(perTurn) })
+      }
+      if (payload.rate_limits && typeof payload.rate_limits === 'object') value.rate = payload.rate_limits
+    }
+  }
+  if (key) {
+    if (rolloutCache.size >= ROLLOUT_CACHE_MAX) rolloutCache.clear()
+    rolloutCache.set(file, { key, value })
+  }
+  return value
+}
+
 /**
  * Read the Codex CLI's own accounting. Codex writes a rollout per session under
  * `~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-*.jsonl`; the newest
@@ -478,51 +544,17 @@ function readCodexCliUsage(dir) {
   let lastContextWindow
 
   for (const file of files) {
-    let text
-    try {
-      text = readFileSync(file, 'utf8')
-    } catch {
-      continue
+    const parsed = parseRollout(file)
+    if (!parsed) continue
+    // Per-day rows count even when the rollout has no cumulative usage block.
+    for (const day of parsed.days) {
+      const row = byDay.get(day.date) ?? { date: day.date, ...blankUsage() }
+      addUsage(row, day.usage)
+      row.turns += 1
+      byDay.set(day.date, row)
     }
-    let sessionId = ''
-    let model = ''
-    let sessionTotals = null
-    let endedAt = 0
-    let rate = null
-    for (const line of text.split(/\r?\n/)) {
-      const trimmed = line.trim()
-      if (trimmed.length === 0 || trimmed[0] !== '{') continue
-      let event
-      try {
-        event = JSON.parse(trimmed)
-      } catch {
-        continue
-      }
-      const at = Date.parse(event?.timestamp ?? '') || 0
-      if (at > endedAt) endedAt = at
-      const payload = event?.payload
-      if (event?.type === 'session_meta') {
-        if (typeof payload?.id === 'string') sessionId = payload.id
-        if (typeof payload?.model === 'string' && payload.model) model = payload.model
-      } else if (event?.type === 'turn_context') {
-        if (typeof payload?.model === 'string' && payload.model) model = payload.model
-      } else if (event?.type === 'event_msg' && payload?.type === 'token_count') {
-        const info = payload.info
-        const cumulative = info?.total_token_usage
-        if (cumulative && typeof cumulative === 'object') sessionTotals = codexUsage(cumulative)
-        const contextWindow = firstNumber(info?.model_context_window, info?.modelContextWindow)
-        if (contextWindow !== undefined) lastContextWindow = contextWindow
-        const perTurn = info?.last_token_usage
-        if (perTurn && typeof perTurn === 'object') {
-          const day = new Date(at || Date.now()).toISOString().slice(0, 10)
-          const row = byDay.get(day) ?? { date: day, ...blankUsage() }
-          addUsage(row, codexUsage(perTurn))
-          row.turns += 1
-          byDay.set(day, row)
-        }
-        if (payload.rate_limits && typeof payload.rate_limits === 'object') rate = payload.rate_limits
-      }
-    }
+    if (parsed.contextWindow !== undefined) lastContextWindow = parsed.contextWindow
+    const { sessionId, model, endedAt, sessionTotals, rate } = parsed
     if (!sessionTotals) continue
     addUsage(totals, sessionTotals)
     totals.turns += 1
@@ -861,6 +893,37 @@ function contentToText(content) {
   return out.join('\n').trim()
 }
 
+/** True when the line is a JSON object, so a log line is not read as one. */
+function isJsonLine(line) {
+  if (!line.startsWith('{')) return false
+  try {
+    JSON.parse(line)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * A CLI release that ignores the JSON flag still prints its answer as plain
+ * text. Recover it only when stdout carried no JSON at all, so a malformed or
+ * unexpected event is never passed off as the reply, and fall back to stderr
+ * only when stdout was empty.
+ */
+function plainTextAnswer(stdout, stderr) {
+  const clean = (source) =>
+    String(source ?? '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !/reading additional input from stdin/i.test(line))
+
+  const outLines = clean(stdout)
+  if (outLines.some(isJsonLine)) return ''
+  const answer = outLines.join('\n').trim()
+  if (answer.length > 0) return answer
+  return clean(stderr).filter((line) => !isJsonLine(line)).join('\n').trim()
+}
+
 /** Parse `opencode models` output: one `provider/model` id per line. */
 function parseOpencodeList(stdout) {
   return stdout
@@ -887,6 +950,15 @@ function parseOpencodeLine(line) {
     event = JSON.parse(line)
   } catch {
     return null
+  }
+  // The CLI reports provider failures (quota, auth, model access) as an error
+  // event on stdout and still exits 0, so the event is the only signal.
+  if (event?.type === 'error') {
+    const message = event?.error?.message ?? event?.message ?? (typeof event?.error === 'string' ? event.error : undefined)
+    const status = firstNumber(event?.error?.status, event?.status)
+    if (typeof message === 'string' && message.length > 0) {
+      return { error: status !== undefined ? `${message} (HTTP ${status})` : message }
+    }
   }
   if (event?.type === 'text' && typeof event.part?.text === 'string' && event.part.text.length > 0) {
     return { text: event.part.text }
@@ -924,6 +996,17 @@ function parseGrokLine(line) {
     event = JSON.parse(line)
   } catch {
     return null
+  }
+  if (event?.type === 'error') {
+    const message = event?.message ?? event?.error?.message ?? (typeof event?.error === 'string' ? event.error : undefined)
+    const status = firstNumber(event?.status, event?.error?.status)
+    if (typeof message === 'string' && message.length > 0) {
+      return { error: status !== undefined ? `${message} (HTTP ${status})` : message }
+    }
+  }
+  if (event?.type === 'result' && (event?.subtype === 'error' || event?.is_error === true)) {
+    const message = event?.error?.message ?? event?.result ?? event?.message
+    if (typeof message === 'string' && message.length > 0) return { error: message }
   }
   if (event?.type === 'text' && typeof event.data === 'string' && event.data.length > 0) {
     return { text: event.data }
@@ -1381,6 +1464,20 @@ class CliAdapter {
     if (!route) throw new Error(`llm-cli: unknown provider route "${provider}"`)
     const turnStartedAt = Date.now()
 
+    // A missing cwd makes spawn fail with an ENOENT that names the binary, so
+    // the turn looks like a missing CLI instead of a bad config path.
+    let cwdIsDirectory = false
+    try {
+      cwdIsDirectory = statSync(this.config.cwd).isDirectory()
+    } catch {
+      cwdIsDirectory = false
+    }
+    if (!cwdIsDirectory) {
+      const message = `llm-cli: the configured cwd is not a directory: ${this.config.cwd}`
+      this.recordFailure(provider, options.model, turnStartedAt, message)
+      throw new Error(message)
+    }
+
     const prompt = buildPrompt(options, this.config.includeSystemPrompt === true)
     const bin = route.bin
     let promptFile
@@ -1413,7 +1510,8 @@ class CliAdapter {
     options.signal?.addEventListener('abort', onAbort, { once: true })
 
     const timeoutMs = route.timeoutMs ?? this.config.timeoutMs ?? DEFAULT_TIMEOUT_MS
-    const timer = setTimeout(() => child.kill(), timeoutMs)
+    let timedOut = false
+    const timer = timeoutMs ? setTimeout(() => { timedOut = true; child.kill() }, timeoutMs) : undefined
 
     const finishCleanup = () => {
       clearTimeout(timer)
@@ -1432,8 +1530,14 @@ class CliAdapter {
     let text = ''
     let usage
     let cost
+    // Block indices are allocated on first use, so text that starts before any
+    // reasoning cannot collide with the reasoning block's index.
+    let nextIndex = 0
+    let textIndex = -1
     let reasoningIndex = -1
+    let reasoningText = ''
     let cliError = ''
+    let stdout = ''
 
     try {
       const closed = new Promise((resolve) => {
@@ -1445,25 +1549,29 @@ class CliAdapter {
       for await (const line of reader) {
         const trimmed = line.trim()
         if (trimmed.length === 0) continue
+        stdout += `${line}\n`
         const parsed = route.parseLine ? route.parseLine(trimmed) : null
         if (parsed?.error) cliError = String(parsed.error).slice(0, 400)
         if (parsed?.usage) usage = parsed.usage
         if (parsed?.cost !== undefined) cost = parsed.cost
         if (parsed?.reasoning) {
           if (reasoningIndex < 0) {
-            reasoningIndex = 0
+            reasoningIndex = nextIndex
+            nextIndex += 1
             yield { type: 'block-start', index: reasoningIndex, blockType: 'reasoning' }
           }
+          reasoningText += parsed.reasoning
           yield { type: 'reasoning-delta', index: reasoningIndex, text: parsed.reasoning }
         }
         if (parsed?.text) {
-          const index = reasoningIndex >= 0 ? 1 : 0
-          if (!started) {
+          if (textIndex < 0) {
+            textIndex = nextIndex
+            nextIndex += 1
             started = true
-            yield { type: 'block-start', index, blockType: 'text' }
+            yield { type: 'block-start', index: textIndex, blockType: 'text' }
           }
           text += parsed.text
-          yield { type: 'text-delta', index, text: parsed.text }
+          yield { type: 'text-delta', index: textIndex, text: parsed.text }
         }
       }
 
@@ -1480,16 +1588,17 @@ class CliAdapter {
         throw new Error(message)
       }
 
-      if (text.length === 0) {
-        // Some CLI releases answer on stderr or in a non-NDJSON payload.
-        const fallback = (stderr || '')
-          .split(/\r?\n/)
-          .filter((line) => !/reading additional input from stdin/i.test(line))
-          .join('\n')
-          .trim()
-        if (exit?.code === 0 && fallback.length > 0 && route.parseList === undefined) {
-          text = fallback
-        }
+      // A killed CLI used to hand back whatever it had streamed as a finished
+      // answer, so a timeout read as a short reply instead of a failure.
+      if (timedOut) {
+        const message = `llm-cli: "${route.displayName}" timed out after ${timeoutMs} ms`
+        this.recordFailure(provider, options.model, turnStartedAt, message)
+        throw new Error(message)
+      }
+
+      if (text.length === 0 && exit?.code === 0) {
+        const answer = plainTextAnswer(stdout, stderr)
+        if (answer.length > 0) text = answer
       }
 
       if (text.length === 0) {
@@ -1501,14 +1610,16 @@ class CliAdapter {
       }
 
       if (!started) {
+        textIndex = nextIndex
+        nextIndex += 1
         started = true
-        yield { type: 'block-start', index: reasoningIndex >= 0 ? 1 : 0, blockType: 'text' }
-        yield { type: 'text-delta', index: reasoningIndex >= 0 ? 1 : 0, text }
+        yield { type: 'block-start', index: textIndex, blockType: 'text' }
+        yield { type: 'text-delta', index: textIndex, text }
       }
 
-      yield { type: 'block-end', index: reasoningIndex >= 0 ? 1 : 0, block: { type: 'text', text } }
+      yield { type: 'block-end', index: textIndex, block: { type: 'text', text } }
       if (reasoningIndex >= 0) {
-        yield { type: 'block-end', index: reasoningIndex, block: { type: 'reasoning', text: '' } }
+        yield { type: 'block-end', index: reasoningIndex, block: { type: 'reasoning', text: reasoningText } }
       }
       if (usage) yield { type: 'usage', usage }
       this.ledger?.record({
@@ -1665,6 +1776,67 @@ class SignInManager {
   }
 }
 
+/** One accumulator row, in the shape the dashboard has always consumed. */
+function blankRow(key) {
+  return {
+    key,
+    turns: 0,
+    errors: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    costUsd: 0,
+    ms: 0,
+    lastAt: 0,
+  }
+}
+
+/** Fold one turn into a row in place. */
+function bumpRow(row, entry) {
+  row.turns += 1
+  if (!entry.ok) row.errors += 1
+  row.inputTokens += entry.inputTokens ?? 0
+  row.outputTokens += entry.outputTokens ?? 0
+  row.cacheReadTokens += entry.cacheReadTokens ?? 0
+  row.costUsd += entry.costUsd ?? 0
+  row.ms += entry.ms ?? 0
+  row.lastAt = Math.max(row.lastAt, entry.at ?? 0)
+  return row
+}
+
+/**
+ * Lifetime totals live beside the retained turns, not inside them. Deriving
+ * them from the capped `entries` array makes every figure plateau at the
+ * retention limit, so a long-lived install would under-report forever.
+ */
+function emptyTotals() {
+  return { turns: 0, providers: {}, models: {} }
+}
+
+function addToTotals(totals, entry) {
+  totals.turns += 1
+  const providerKey = String(entry.provider ?? '')
+  const modelKey = `${providerKey}/${entry.model}`
+  totals.providers[providerKey] = bumpRow(totals.providers[providerKey] ?? blankRow(providerKey), entry)
+  totals.models[modelKey] = bumpRow(totals.models[modelKey] ?? blankRow(modelKey), entry)
+  return totals
+}
+
+function totalsFrom(entries) {
+  const totals = emptyTotals()
+  for (const entry of entries ?? []) addToTotals(totals, entry)
+  return totals
+}
+
+/** Keep a persisted totals block only when it still has the expected shape. */
+function readTotals(candidate) {
+  if (!candidate || typeof candidate !== 'object') return null
+  const providers = candidate.providers && typeof candidate.providers === 'object' ? candidate.providers : null
+  const models = candidate.models && typeof candidate.models === 'object' ? candidate.models : null
+  if (!providers || !models || !Number.isFinite(candidate.turns)) return null
+  return { turns: candidate.turns, providers, models }
+}
+
 /**
  * Per-route usage ledger: one record per finished CLI turn, persisted so the
  * dashboard survives a harness restart. Records carry counts and cost only,
@@ -1675,65 +1847,46 @@ class UsageLedger {
     this.file = file
     this.limit = limit ?? 1000
     this.entries = []
+    this.totals = emptyTotals()
     this.load()
   }
 
   load() {
     if (!this.file) return
+    let parsed
     try {
-      const parsed = JSON.parse(readFileSync(this.file, 'utf8'))
-      if (Array.isArray(parsed?.entries)) this.entries = parsed.entries.slice(-this.limit)
+      parsed = JSON.parse(readFileSync(this.file, 'utf8'))
     } catch {
       /* first run, or an unreadable ledger: start empty */
+      return
     }
+    if (Array.isArray(parsed?.entries)) this.entries = parsed.entries.slice(-this.limit)
+    // A version 1 file has no totals block, so recover them from the turns it
+    // does carry. That is the best available answer, not a lifetime figure.
+    this.totals = readTotals(parsed?.totals) ?? totalsFrom(parsed?.entries)
+    if (this.totals.turns < this.entries.length) this.totals.turns = this.entries.length
   }
 
   record(entry) {
     this.entries.push(entry)
     if (this.entries.length > this.limit) this.entries = this.entries.slice(-this.limit)
+    addToTotals(this.totals, entry)
     if (!this.file) return
     try {
       mkdirSync(dirname(this.file), { recursive: true })
-      writeFileSync(this.file, JSON.stringify({ version: 1, entries: this.entries }), 'utf8')
+      writeFileSync(this.file, JSON.stringify({ version: 2, totals: this.totals, entries: this.entries }), 'utf8')
     } catch {
       /* the dashboard still serves from memory; persistence is best effort */
     }
   }
 
-  /** Totals per route and per model, plus the newest turns first. */
+  /** Lifetime totals per route and per model, plus the newest turns first. */
   summary() {
-    const providers = new Map()
-    const models = new Map()
-    const bump = (map, key, entry) => {
-      const row = map.get(key) ?? {
-        key,
-        turns: 0,
-        errors: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadTokens: 0,
-        costUsd: 0,
-        ms: 0,
-        lastAt: 0,
-      }
-      row.turns += 1
-      if (!entry.ok) row.errors += 1
-      row.inputTokens += entry.inputTokens ?? 0
-      row.outputTokens += entry.outputTokens ?? 0
-      row.cacheReadTokens += entry.cacheReadTokens ?? 0
-      row.costUsd += entry.costUsd ?? 0
-      row.ms += entry.ms ?? 0
-      row.lastAt = Math.max(row.lastAt, entry.at ?? 0)
-      map.set(key, row)
-    }
-    for (const entry of this.entries) {
-      bump(providers, entry.provider, entry)
-      bump(models, `${entry.provider}/${entry.model}`, entry)
-    }
+    const sortByTurns = (left, right) => right.turns - left.turns
     return {
-      providers: [...providers.values()].sort((left, right) => right.turns - left.turns),
-      models: [...models.values()].sort((left, right) => right.turns - left.turns),
-      turns: this.entries.length,
+      providers: Object.values(this.totals.providers).sort(sortByTurns),
+      models: Object.values(this.totals.models).sort(sortByTurns),
+      turns: this.totals.turns,
       recent: this.entries.slice(-60).reverse(),
       ledgerFile: this.file,
     }
@@ -2098,7 +2251,7 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans) 
 </head>
 <body>
 <h1>CLI provider usage</h1>
-<div class="sub">OpenCode CLI and Grok CLI usage · ${windowLabel} · window ${windowLinks} · page refreshes every 20s · <a href="/llm-cli/usage.json?days=${windowDaysShown || 'all'}" style="color:#6fb3ff">JSON</a></div>
+<div class="sub">OpenCode, Grok and Codex CLI usage · ${windowLabel} · window ${windowLinks} · page refreshes every 20s · <a href="/llm-cli/usage.json?days=${windowDaysShown || 'all'}" style="color:#6fb3ff">JSON</a></div>
 <div class="cards">
   <div class="card"><div class="k">Turns recorded</div><div class="v">${summary.turns}</div></div>
   <div class="card"><div class="k">Total spend</div><div class="v">$${summary.providers.reduce((sum, item) => sum + item.costUsd, 0).toFixed(4)}</div></div>
