@@ -96,6 +96,26 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
 - `providers.<id>` — `false`/`{enabled:false}` to disable a route; `models` to
   offer an explicit list (otherwise whatever the CLI lists); `bin`,
   `defaultModel`, `displayName`, `contextWindow` to override.
+- `providers.<id>.models` entries are either a bare model id or an object that
+  also states that model's limits: `{ id, name?, contextWindow?,
+  maxOutputTokens? }`. The object form is for routes whose CLI publishes ids but
+  no limits — OpenCode is the one shipped today, so every OpenCode model would
+  otherwise report the harness default of 200,000 tokens. A configured entry
+  wins over the route's `contextWindow` and over anything a CLI cache reports:
+
+  ```yaml
+  providers:
+    opencode:
+      models:
+        - opencode/deepseek-v4.1-flash-free
+        - id: getvibe/deepseek-v4.1-flash
+          name: DeepSeek V4.1 Flash (getvibe)
+          contextWindow: 65536
+          maxOutputTokens: 8192
+  ```
+
+  The dashboard labels such a row `configured for this model` rather than
+  claiming the CLI published it.
 - `timeoutMs` — per-turn timeout.
 - `plan.<route>` — optional monthly budget for the dashboard gauges:
   `monthlyBudgetUsd`, `monthlyBudgetTokens` and `resetDay`.

@@ -6,6 +6,15 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `providers.<id>.models` accepts an object entry (`{ id, name?, contextWindow?,
+  maxOutputTokens? }`) beside the bare model id it already took. It exists for
+  routes whose CLI publishes ids but no limits — every OpenCode model otherwise
+  reported the 200,000-token harness default — and a configured entry wins over
+  the route's `contextWindow` and over a CLI cache. The dashboard labels such a
+  row `configured for this model`.
+
 ### Fixed
 
 - Failed or missing CLI authentication probes no longer report OpenCode as
