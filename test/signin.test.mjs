@@ -8,7 +8,8 @@ import { rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { SignInManager, apply, parseDeviceInfo } from '../index.js'
+import { SignInManager, parseDeviceInfo } from '../index.js'
+import { mount } from './_harness.mjs'
 import { assert, assertEqual, assertMatch } from './_assert.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -41,28 +42,19 @@ assertEqual((await manager.status('grok')).signedIn, true, 'ends signed in')
 // Auto sign-in: a route whose CLI is signed out must surface the device code
 // through the turn's error instead of just failing.
 rmSync(flag, { force: true })
-let captured
-apply(
-  {
-    logger: { info() {}, warn() {} },
-    llm: { registerAdapter: (_routes, adapter) => { captured = adapter } },
-    inject: (_deps, cb) => cb({ tools: { register() {} }, webServer: { register: () => () => {} }, effect() {} }),
-    effect() {},
-  },
-  {
-    cwd: here,
-    providers: {
-      opencode: {
-        bin: process.execPath,
-        statusArgs: [stub, 'models'],
-        loginArgs: [stub, 'login'],
-        signedIn: (out) => /logged in/i.test(out) && !/not authenticated/i.test(out),
-        buildArgs: () => [stub, 'fail'],
-      },
-      grok: false,
+const { adapter: captured } = mount({
+  cwd: here,
+  providers: {
+    opencode: {
+      bin: process.execPath,
+      statusArgs: [stub, 'models'],
+      loginArgs: [stub, 'login'],
+      signedIn: (out) => /logged in/i.test(out) && !/not authenticated/i.test(out),
+      buildArgs: () => [stub, 'fail'],
     },
+    grok: false,
   },
-)
+})
 
 let autoError
 try {

@@ -6,7 +6,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { apply } from '../index.js'
+import { mount } from './_harness.mjs'
 import { assert, assertEqual } from './_assert.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -30,24 +30,14 @@ writeFileSync(
   'utf8',
 )
 
-let adapter
-let routeNames
-apply(
-  {
-    logger: { info() {}, warn() {} },
-    llm: { registerAdapter: (routes, value) => { routeNames = routes; adapter = value } },
-    inject: (_deps, cb) => cb({ tools: { register() {} }, webServer: { register: () => () => {} }, effect() {} }),
-    effect() {},
+const { adapter, routes: routeNames } = mount({
+  cwd: here,
+  providers: {
+    codex: { bin: process.execPath, buildArgs: () => [stub, 'codex'], modelsCacheFile: cache },
+    grok: false,
+    opencode: false,
   },
-  {
-    cwd: here,
-    providers: {
-      codex: { bin: process.execPath, buildArgs: () => [stub, 'codex'], modelsCacheFile: cache },
-      grok: false,
-      opencode: false,
-    },
-  },
-)
+})
 
 assertEqual(routeNames, ['codex'], 'only the configured route is registered')
 assertEqual(adapter.providerInfo('codex').name, 'Codex (CLI)', 'provider info carries the display name')
