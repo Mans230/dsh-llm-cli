@@ -6,6 +6,37 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0]
+
+Each CLI is still read from its own source. This release makes the shape of
+those views the same, states what each one can report, and stops printing a
+zero for a figure the CLI never produced.
+
+### Added
+
+- `capabilities` on every CLI usage view, with `cost`, `rateLimits`, `perStep`
+  and a `costReason`. A caller can tell "free" from "not reported".
+- `costTurns` in the ledger totals, so the dashboard knows whether a route has
+  ever reported a cost.
+- `test/views.test.mjs` pins the per-CLI measurement rules and the
+  dash-not-zero rule for both halves.
+
+### Changed
+
+- A turn on a route that reports usage per agent step now sums the steps.
+  OpenCode reports one `step_finish` per step, and the adapter kept only the
+  last one, so a multi-step turn under-reported tokens and cost.
+- Unavailable figures render as a dash in the server-rendered page as well as
+  the React page. Codex cost is a dash everywhere, because that CLI reports no
+  cost at all.
+- A window note for a CLI that could not answer keeps that CLI's own reason
+  instead of replacing it with a window count.
+
+### Fixed
+
+- The window note could read `last 7.0000183 days`, because it recomputed the
+  window from `Date.now()` instead of using the requested one.
+
 ## [0.3.1]
 
 ### Fixed

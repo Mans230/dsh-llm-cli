@@ -99,6 +99,7 @@ const html = render(React.createElement(exportsObj.LlmCliPage, { view: 'full' })
 const count = (re) => (html.match(re) ?? []).length
 assert(count(/<svg/g) >= 4, `the page renders SVG charts (got ${count(/<svg/g)})`)
 assert(count(/<table/g) >= 3, `the page renders usage tables (got ${count(/<table/g)})`)
+assert(html.includes('\u2014'), 'a cost no CLI reported renders as a dash, not a zero')
 for (const needle of [
   'Codex daily tokens',
   'Codex 5-hour limit',

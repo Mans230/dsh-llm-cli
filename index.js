@@ -199,6 +199,26 @@ function blankUsage() {
   }
 }
 
+/**
+ * The shape every CLI usage view returns, whether or not the CLI could answer.
+ * `capabilities` says what that CLI actually reports, so a consumer can show a
+ * dash instead of inventing a zero. `costReason` explains a `cost: false`.
+ */
+function blankCliUsage(source, capabilities) {
+  return {
+    available: false,
+    source,
+    ...blankUsage(),
+    sessions: [],
+    sessionCount: 0,
+    models: [],
+    daily: [],
+    recentSessions: [],
+    note: '',
+    capabilities: capabilities ?? { cost: false, rateLimits: false, perStep: false },
+  }
+}
+
 /** Add the numeric usage fields of `source` into `target` in place. */
 function addUsage(target, source) {
   for (const field of USAGE_FIELDS) {
@@ -235,16 +255,13 @@ function grokSessionUsage(block) {
  */
 function readGrokCliUsage(dir) {
   const empty = {
-    available: false,
-    source: 'grok session usage.json files',
+    ...blankCliUsage('grok session usage.json files', {
+      cost: false,
+      costReason: 'the Grok CLI records no token or cost usage here',
+      rateLimits: false,
+      perStep: false,
+    }),
     dir: dir ?? '',
-    ...blankUsage(),
-    sessions: [],
-    sessionCount: 0,
-    models: [],
-    daily: [],
-    recentSessions: [],
-    note: '',
   }
   if (!dir || !existsSync(dir)) return { ...empty, note: 'grok sessions directory not found' }
   let workspaces = []
@@ -316,16 +333,22 @@ function readGrokCliUsage(dir) {
   sessions.sort((left, right) => right.endedAt - left.endedAt)
   const models = [...byModel.values()].sort((left, right) => right.totalTokens - left.totalTokens)
   const daily = [...byDay.values()].sort((left, right) => (left.date < right.date ? -1 : 1))
+  const available = sessionCount > 0
   return {
     ...empty,
-    available: sessionCount > 0,
+    available,
     ...totals,
     sessions,
     sessionCount,
     models,
     daily,
     recentSessions: sessions.slice(0, 25),
-    note: sessionCount === 0 ? 'no grok session usage recorded yet' : '',
+    note: available ? '' : 'the Grok CLI writes no usage.json on this version, so it reports no usage',
+    capabilities: {
+      ...empty.capabilities,
+      cost: available,
+      costReason: available ? undefined : 'the Grok CLI writes no usage.json on this version',
+    },
   }
 }
 
@@ -336,8 +359,8 @@ function readGrokCliUsage(dir) {
  * "all". The full session list is kept so plans can still measure their own
  * billing period.
  */
-function windowGrokUsage(full, sinceMs) {
-  return windowCliUsage(full, sinceMs, 'grok')
+function windowGrokUsage(full, sinceMs, windowDays = 0) {
+  return windowCliUsage(full, sinceMs, 'grok', windowDays)
 }
 
 /**
@@ -345,7 +368,7 @@ function windowGrokUsage(full, sinceMs) {
  * the recent list are recomputed over the same window so they agree with the
  * headline numbers. A non-positive window means "all".
  */
-function windowCliUsage(full, sinceMs, what = 'cli') {
+function windowCliUsage(full, sinceMs, what = 'cli', windowDays = 0) {
   if (!full || !(sinceMs > 0)) return full
   const cutoffDate = new Date(sinceMs).toISOString().slice(0, 10)
   const sessions = (full.sessions ?? []).filter((session) => (session.endedAt ?? 0) >= sinceMs)
@@ -371,9 +394,14 @@ function windowCliUsage(full, sinceMs, what = 'cli') {
     models,
     daily,
     recentSessions: sessions.slice(0, 25),
+    // A CLI that could not answer at all keeps its own reason. Otherwise the
+    // note names the window, and the window is the one the caller asked for, so
+    // it cannot drift into a value like "7.0000183 days".
     note:
       sessions.length === 0
-        ? `no ${what} sessions in the ${windowLabelFor((Date.now() - sinceMs) / 86400000)}`
+        ? full.available === false && full.note
+          ? full.note
+          : `no ${what} sessions in the ${windowLabelFor(windowDays)}`
         : '',
   }
 }
@@ -514,17 +542,14 @@ function parseRollout(file) {
  */
 function readCodexCliUsage(dir) {
   const empty = {
-    available: false,
-    source: 'codex session rollouts',
+    ...blankCliUsage('codex session rollouts', {
+      cost: false,
+      costReason: 'the Codex CLI reports tokens and rate limits, never a cost',
+      rateLimits: true,
+      perStep: false,
+    }),
     dir: dir ?? '',
-    ...blankUsage(),
-    sessions: [],
-    sessionCount: 0,
-    models: [],
-    daily: [],
-    recentSessions: [],
     limits: { primary: null, secondary: null },
-    note: '',
   }
   if (!dir || !existsSync(dir)) return { ...empty, note: 'codex sessions directory not found' }
   let files = []
@@ -596,6 +621,7 @@ function readCodexCliUsage(dir) {
     limits,
     contextWindow: lastContextWindow,
     note: sessions.length === 0 ? 'no codex turns recorded yet' : '',
+    capabilities: { ...empty.capabilities, cost: false },
   }
 }
 
@@ -650,6 +676,7 @@ function toOpencodeCliUsage(stats, args) {
     })),
     tools,
     note: '',
+    capabilities: { cost: true, rateLimits: false, perStep: true },
   }
 }
 
@@ -976,6 +1003,8 @@ function parseOpencodeLine(line) {
           reasoningTokens: toCount(tokens.reasoning),
         },
         cost,
+        // One step_finish per agent step, so a turn's total is their sum.
+        usageDelta: true,
       }
     }
     if (cost !== undefined) return { cost }
@@ -1379,6 +1408,7 @@ class CliAdapter {
           outputTokens: row?.outputTokens ?? 0,
           cacheReadTokens: row?.cacheReadTokens ?? 0,
           costUsd: row?.costUsd ?? 0,
+          costTurns: row?.costTurns ?? 0,
           ms: row?.ms ?? 0,
           lastAt: row?.lastAt ?? 0,
         },
@@ -1416,21 +1446,28 @@ class CliAdapter {
       try {
         fullGrok = readGrokCliUsage(this.config.grokUsageDir)
       } catch (error) {
-        fullGrok = { available: false, note: String(error?.message ?? error), ...blankUsage(), sessions: [], sessionCount: 0, models: [], daily: [], recentSessions: [] }
+        fullGrok = { ...blankCliUsage('grok session usage.json files'), note: String(error?.message ?? error) }
       }
     }
     if (this.config.providers.codex) {
       try {
         fullCodex = readCodexCliUsage(this.config.codexUsageDir)
       } catch (error) {
-        fullCodex = { available: false, note: String(error?.message ?? error), ...blankUsage(), sessions: [], sessionCount: 0, models: [], daily: [], recentSessions: [], limits: { primary: null, secondary: null } }
+        fullCodex = {
+          ...blankCliUsage('codex session rollouts', { cost: false, rateLimits: true, perStep: false }),
+          limits: { primary: null, secondary: null },
+          note: String(error?.message ?? error),
+        }
       }
     }
     if (this.config.providers.opencode) {
       try {
         value.opencode = await readOpencodeCliUsage(this.config.providers.opencode, this.config.cwd, 30000, daysArg)
       } catch (error) {
-        value.opencode = { available: false, note: String(error?.message ?? error) }
+        value.opencode = {
+          ...blankCliUsage('opencode stats', { cost: true, rateLimits: false, perStep: true }),
+          note: String(error?.message ?? error),
+        }
       }
     }
     try {
@@ -1439,8 +1476,8 @@ class CliAdapter {
       value.plans = {}
     }
     const since = windowDays > 0 ? now - windowDays * 86400000 : 0
-    value.grok = fullGrok ? windowGrokUsage(fullGrok, since) : null
-    value.codex = fullCodex ? windowCliUsage(fullCodex, since, 'codex') : null
+    value.grok = fullGrok ? windowGrokUsage(fullGrok, since, windowDays) : null
+    value.codex = fullCodex ? windowCliUsage(fullCodex, since, 'codex', windowDays) : null
     this.cliUsageCache.set(windowDays, { at: now, value })
     return value
   }
@@ -1552,8 +1589,15 @@ class CliAdapter {
         stdout += `${line}\n`
         const parsed = route.parseLine ? route.parseLine(trimmed) : null
         if (parsed?.error) cliError = String(parsed.error).slice(0, 400)
-        if (parsed?.usage) usage = parsed.usage
-        if (parsed?.cost !== undefined) cost = parsed.cost
+        if (parsed?.usage) {
+          // A route that reports usage per agent step accumulates it. A route
+          // that reports one total for the turn replaces it, so nothing is
+          // counted twice.
+          usage = parsed.usageDelta ? addUsage(usage ?? {}, parsed.usage) : parsed.usage
+        }
+        if (parsed?.cost !== undefined) {
+          cost = parsed.usageDelta ? (cost ?? 0) + parsed.cost : parsed.cost
+        }
         if (parsed?.reasoning) {
           if (reasoningIndex < 0) {
             reasoningIndex = nextIndex
@@ -1786,6 +1830,9 @@ function blankRow(key) {
     outputTokens: 0,
     cacheReadTokens: 0,
     costUsd: 0,
+    // Turns that reported a cost at all. A route whose CLI never reports one
+    // (Codex) would otherwise show a confident $0.00.
+    costTurns: 0,
     ms: 0,
     lastAt: 0,
   }
@@ -1798,7 +1845,10 @@ function bumpRow(row, entry) {
   row.inputTokens += entry.inputTokens ?? 0
   row.outputTokens += entry.outputTokens ?? 0
   row.cacheReadTokens += entry.cacheReadTokens ?? 0
-  row.costUsd += entry.costUsd ?? 0
+  if (typeof entry.costUsd === 'number' && Number.isFinite(entry.costUsd)) {
+    row.costUsd += entry.costUsd
+    row.costTurns += 1
+  }
   row.ms += entry.ms ?? 0
   row.lastAt = Math.max(row.lastAt, entry.at ?? 0)
   return row
@@ -1834,6 +1884,12 @@ function readTotals(candidate) {
   const providers = candidate.providers && typeof candidate.providers === 'object' ? candidate.providers : null
   const models = candidate.models && typeof candidate.models === 'object' ? candidate.models : null
   if (!providers || !models || !Number.isFinite(candidate.turns)) return null
+  // Totals written before costTurns existed are ambiguous when the cost is
+  // zero, which is exactly the case a dash exists for. A positive total proves
+  // some turn reported a cost, so it keeps the figure it showed.
+  for (const row of [...Object.values(providers), ...Object.values(models)]) {
+    if (row && !Number.isFinite(row.costTurns)) row.costTurns = row.costUsd > 0 ? row.turns ?? 0 : 0
+  }
   return { turns: candidate.turns, providers, models }
 }
 
@@ -2065,7 +2121,7 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans) 
   const routeCards = (routes ?? [])
     .map(
       (route) =>
-        `<div class="card"><div class="k">${escapeHtml(route.displayName)}</div><div class="v">${route.usage.turns} turns</div><div class="k">$${route.usage.costUsd.toFixed(4)} \u00b7 ${compact(route.usage.inputTokens)} in / ${compact(route.usage.outputTokens)} out<br>${
+        `<div class="card"><div class="k">${escapeHtml(route.displayName)}</div><div class="v">${route.usage.turns} turns</div><div class="k">${route.usage.costTurns === 0 ? '\u2014' : `$${route.usage.costUsd.toFixed(4)}`} \u00b7 ${compact(route.usage.inputTokens)} in / ${compact(route.usage.outputTokens)} out<br>${
           route.signedIn === null ? 'sign-in unknown' : route.signedIn ? 'signed in' : 'not signed in'
         }</div></div>`,
     )
@@ -2074,22 +2130,43 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans) 
   const opencodeCli = cliUsage?.opencode
   const codexCli = cliUsage?.codex
   const cliCards = []
+  // A CLI that could not answer, or that never reports a figure, gets a dash.
+  // Printing 0 claims a measurement the CLI never made.
+  const dash = '\u2014'
   if (grokCli?.available !== undefined) {
     cliCards.push(
-      `<div class="card"><div class="k">Grok CLI tokens</div><div class="v">${compact(grokCli.totalTokens)}</div><div class="k">${grokCli.sessionCount} sessions \u00b7 ${compact(grokCli.inputTokens)} in / ${compact(grokCli.outputTokens)} out</div></div>` +
-        `<div class="card"><div class="k">Grok CLI cost</div><div class="v">$${(grokCli.costUsd ?? 0).toFixed(2)}</div><div class="k">${grokCli.available ? 'from grok session usage' : escapeHtml(grokCli.note ?? 'unavailable')}</div></div>`,
+      `<div class="card"><div class="k">Grok CLI tokens</div><div class="v">${grokCli.available ? compact(grokCli.totalTokens) : dash}</div><div class="k">${
+        grokCli.available
+          ? `${grokCli.sessionCount} sessions \u00b7 ${compact(grokCli.inputTokens)} in / ${compact(grokCli.outputTokens)} out`
+          : escapeHtml(grokCli.note ?? 'unavailable')
+      }</div></div>` +
+        `<div class="card"><div class="k">Grok CLI cost</div><div class="v">${grokCli.available ? `$${(grokCli.costUsd ?? 0).toFixed(2)}` : dash}</div><div class="k">${
+          grokCli.available ? 'from grok session usage' : escapeHtml(grokCli.capabilities?.costReason ?? grokCli.note ?? 'unavailable')
+        }</div></div>`,
     )
   }
   if (codexCli?.available !== undefined) {
     cliCards.push(
-      `<div class="card"><div class="k">Codex CLI tokens</div><div class="v">${compact(codexCli.totalTokens)}</div><div class="k">${codexCli.sessionCount} sessions \u00b7 ${compact(codexCli.inputTokens)} in / ${compact(codexCli.outputTokens)} out</div></div>` +
-        `<div class="card"><div class="k">Codex cached input</div><div class="v">${compact(codexCli.cacheReadTokens)}</div><div class="k">${codexCli.available ? `${codexCli.turns} turns` : escapeHtml(codexCli.note ?? 'unavailable')}</div></div>`,
+      `<div class="card"><div class="k">Codex CLI tokens</div><div class="v">${codexCli.available ? compact(codexCli.totalTokens) : dash}</div><div class="k">${
+        codexCli.available
+          ? `${codexCli.sessionCount} sessions \u00b7 ${compact(codexCli.inputTokens)} in / ${compact(codexCli.outputTokens)} out`
+          : escapeHtml(codexCli.note ?? 'unavailable')
+      }</div></div>` +
+        `<div class="card"><div class="k">Codex cost</div><div class="v">${dash}</div><div class="k">${escapeHtml(
+          codexCli.capabilities?.costReason ?? 'the Codex CLI reports no cost',
+        )}</div></div>`,
     )
   }
   if (opencodeCli?.available !== undefined) {
     cliCards.push(
-      `<div class="card"><div class="k">OpenCode CLI tokens</div><div class="v">${compact(opencodeCli.totalTokens)}</div><div class="k">${opencodeCli.sessions ?? 0} sessions \u00b7 ${compact(opencodeCli.prompts ?? 0)} prompts</div></div>` +
-        `<div class="card"><div class="k">OpenCode CLI cost</div><div class="v">$${(opencodeCli.costUsd ?? 0).toFixed(2)}</div><div class="k">${opencodeCli.available ? `${opencodeCli.steps ?? 0} steps` : escapeHtml(opencodeCli.note ?? 'unavailable')}</div></div>`,
+      `<div class="card"><div class="k">OpenCode CLI tokens</div><div class="v">${opencodeCli.available ? compact(opencodeCli.totalTokens) : dash}</div><div class="k">${
+        opencodeCli.available
+          ? `${opencodeCli.sessions ?? 0} sessions \u00b7 ${compact(opencodeCli.prompts ?? 0)} prompts`
+          : escapeHtml(opencodeCli.note ?? 'unavailable')
+      }</div></div>` +
+        `<div class="card"><div class="k">OpenCode CLI cost</div><div class="v">${opencodeCli.available ? `$${(opencodeCli.costUsd ?? 0).toFixed(2)}` : dash}</div><div class="k">${
+          opencodeCli.available ? `${opencodeCli.steps ?? 0} steps` : escapeHtml(opencodeCli.note ?? 'unavailable')
+        }</div></div>`,
     )
   }
   const planCards = []
@@ -2178,7 +2255,7 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans) 
         compact(model.outputTokens),
         compact(model.cacheReadTokens),
         compact(model.totalTokens),
-        `$${(model.costUsd ?? 0).toFixed(4)}`,
+        codexCli?.capabilities?.cost === false ? dash : `$${(model.costUsd ?? 0).toFixed(4)}`,
       ]),
     )
     .join('')

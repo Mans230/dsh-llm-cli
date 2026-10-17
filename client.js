@@ -390,7 +390,8 @@ window.__ModuleLoader__.load({
         rows.push(['OpenCode', model.id, model.steps || 0, counts(model.inputTokens), counts(model.outputTokens), counts(model.cacheReadTokens), counts(model.totalTokens), usd4(model.costUsd)])
       }
       for (const model of codex?.models ?? []) {
-        rows.push(['Codex', model.id, model.turns || 0, counts(model.inputTokens), counts(model.outputTokens), counts(model.cacheReadTokens), counts(model.totalTokens), usd4(model.costUsd)])
+        // The Codex CLI reports no cost, so a dash is the honest cell here.
+        rows.push(['Codex', model.id, model.turns || 0, counts(model.inputTokens), counts(model.outputTokens), counts(model.cacheReadTokens), counts(model.totalTokens), codex?.capabilities?.cost === false ? '\u2014' : usd4(model.costUsd)])
       }
       return h(Table, {
         head: ['Route', 'Model', 'Steps', 'In', 'Out', 'Cache read', 'Total', 'Cost'],
@@ -701,7 +702,7 @@ window.__ModuleLoader__.load({
                   { key: route.id, style: S.card },
                   h('div', { style: S.k }, route.displayName),
                   h('div', { style: S.v }, `${route.usage.turns} turn${route.usage.turns === 1 ? '' : 's'}`),
-                  h('div', { style: S.k }, `${usd4(route.usage.costUsd)} \u00b7 ${counts(route.usage.inputTokens)} in / ${counts(route.usage.outputTokens)} out`),
+                  h('div', { style: S.k }, `${route.usage.costTurns === 0 ? '\u2014' : usd4(route.usage.costUsd)} \u00b7 ${counts(route.usage.inputTokens)} in / ${counts(route.usage.outputTokens)} out`),
                   h('div', { style: S.k }, `${route.signedIn === null ? 'sign-in unknown' : route.signedIn ? 'signed in' : route.signInOptional ? 'no sign-in needed' : 'not signed in'} \u00b7 ${route.models.length} models`),
                 ),
               ),

@@ -130,7 +130,8 @@ Two independent usage views are shown, and they answer different questions:
   - **Grok** — the CLI persists per-session token and cost accounting at
     `~/.grok/sessions/<workspace>/<sessionId>/usage.json`; the dashboard sums
     those files (per model, per day, per session). Cost is stored as ticks of
-    `1e-10` USD.
+    `1e-10` USD. Grok CLI 1.0.62 writes no such file, so this view reports
+    itself unavailable instead of showing zero.
   - **OpenCode** — the dashboard runs `opencode stats --json --all --models
     --cost` (cached) for lifetime totals, per-model usage and a daily activity
     series.
@@ -139,6 +140,12 @@ Two independent usage views are shown, and they answer different questions:
     newest `token_count` event for cumulative tokens per model and the account
     `rate_limits` (a **5-hour** `primary` window and a **weekly** `secondary`
     window, each with a real used-percentage and reset time).
+
+Each CLI is read from the source that suits it, and every view carries
+`available`, `source`, `note` and `capabilities`. A figure a CLI does not report
+is a dash, not a zero. Codex cost is always a dash, and so is Grok usage on the
+current build. Only OpenCode reports usage per agent step, so only its turns sum
+their steps.
 
 ## What each CLI can and cannot report
 
@@ -175,6 +182,7 @@ builds synthetic Codex rollouts for the usage reader.
 | `test/usage.test.mjs` | Codex rollout reading (tokens, models, days, 5h/weekly limits) and windowing |
 | `test/client.test.mjs` | the browser half rendered against a real payload |
 | `test/failures.test.mjs` | CLI error events, timeouts, plain-text answers, a bad `cwd`, block indices |
+| `test/views.test.mjs` | per-CLI usage rules (step summing, single totals), capabilities, dashes |
 | `test/contract.test.mjs` | the manifest and both halves' public exports |
 
 Every suite mounts through `test/_harness.mjs`, which gives it a scratch

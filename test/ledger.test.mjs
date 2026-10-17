@@ -3,7 +3,7 @@
  * OpenCode-shaped NDJSON turn (text + tokens + cost) and a failing turn, then
  * checks the usage ledger recorded both.
  */
-import { rmSync } from 'node:fs'
+import { rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -86,6 +86,30 @@ assertEqual(reloaded.turns, 200, 'lifetime turns survive a restart')
 assertEqual(Number(reloaded.providers[0].costUsd.toFixed(2)), 2, 'lifetime cost survives a restart')
 assertEqual(reloaded.recent.length, 50, 'retention still caps the stored turns')
 rmSync(retentionFile, { force: true })
+
+// A totals block written before costTurns existed must not claim a cost it
+// cannot prove. A positive total proves it, a zero total does not.
+const legacyFile = join(tmpdir(), `dsh-llm-cli-ledger-legacy-${process.pid}.json`)
+writeFileSync(
+  legacyFile,
+  JSON.stringify({
+    version: 2,
+    totals: {
+      turns: 3,
+      providers: {
+        paid: { key: 'paid', turns: 2, errors: 0, inputTokens: 20, outputTokens: 2, cacheReadTokens: 0, costUsd: 1.5, ms: 10, lastAt: 2 },
+        free: { key: 'free', turns: 1, errors: 0, inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, costUsd: 0, ms: 5, lastAt: 1 },
+      },
+      models: {},
+    },
+    entries: [],
+  }),
+  'utf8',
+)
+const legacy = new UsageLedger(legacyFile).summary()
+assertEqual(legacy.providers.find((row) => row.key === 'paid').costTurns, 2, 'a legacy row with spend keeps its figure')
+assertEqual(legacy.providers.find((row) => row.key === 'free').costTurns, 0, 'a legacy row with no spend is not assumed to have reported')
+rmSync(legacyFile, { force: true })
 
 rmSync(ledger, { force: true })
 assert(true, 'ledger test')
