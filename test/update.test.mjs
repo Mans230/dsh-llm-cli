@@ -120,6 +120,14 @@ const versionServer = createServer((request, response) => {
 await new Promise((resolve) => versionServer.listen(0, '127.0.0.1', resolve))
 const source = `http://127.0.0.1:${versionServer.address().port}/package.json`
 
+const overriddenSource = new UpdateManager({}, { source, install: { method: 'unknown', dir: root } })
+const overriddenCheck = await overriddenSource.check()
+assertEqual(overriddenCheck.source, source, 'update status identifies the source actually fetched')
+assertEqual(overriddenCheck.latest, '9.9.9', 'the source option is actually fetched')
+let defaultSource
+try { defaultSource = new UpdateManager().status().source } catch { /* asserted below */ }
+assertEqual(typeof defaultSource, 'string', 'a default update manager exposes its effective source')
+
 const manager = new UpdateManager({ updateSource: source, autoUpdate: false }, { install: { method: 'unknown', dir: root } })
 const checked = await manager.check({ force: true })
 assertEqual(checked.latest, '9.9.9', 'the published version is read')

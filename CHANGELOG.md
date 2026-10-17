@@ -8,6 +8,12 @@ All notable changes to this plugin are documented here. The format follows
 
 ### Fixed
 
+- Failed or missing CLI authentication probes no longer report OpenCode as
+  signed in merely because their output lacks a signed-out phrase.
+- Codex model-list overrides preserve a custom `readModels` hook and honor
+  `modelsCacheFile` even when the configured model filter is empty.
+- Update status reports the effective source URL, including an `options.source`
+  override, and a directly constructed update manager accepts default config.
 - A CLI that emits partial text and then exits unsuccessfully or reports an
   error now fails the turn and records the reason, instead of recording success.
 - Already-aborted requests do not launch a CLI; running cancellations record
@@ -20,6 +26,8 @@ All notable changes to this plugin are documented here. The format follows
 
 ### Tests
 
+- Add authentication-probe, Codex reader/cache override and update-source
+  regressions; the audit runner now selects CI evidence for the current commit.
 - Pin the update exports and additional manifest fields in the contract suite;
   exercise both client slot registrations, disposal and the summary view.
 - Isolate the client suite from installed CLIs using local process fixtures.

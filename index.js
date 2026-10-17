@@ -1951,13 +1951,14 @@ class SignInManager {
   /** Ask the CLI itself whether it is already signed in. */
   async status(provider) {
     const { route, signedIn, statusArgs } = this.routeFor(provider)
-    const { stdout, stderr } = await runCapture(route, statusArgs, {
+    const { code, stdout, stderr } = await runCapture(route, statusArgs, {
       cwd: this.config.cwd,
       timeoutMs: 30000,
-    }).catch(() => ({ stdout: '', stderr: '' }))
+    }).catch(() => ({ code: null, stdout: '', stderr: '' }))
     const text = `${stdout}\n${stderr}`
-    // `grok models` reports signed-out state on exit code 1, so the text decides.
-    return { signedIn: signedIn(text), text: text.trim() }
+    // A status probe must both succeed and identify an authenticated account.
+    // OpenCode's negative-text predicate alone also accepts empty/error output.
+    return { signedIn: code === 0 && signedIn(text), text: text.trim() }
   }
 
   /**
@@ -2487,7 +2488,7 @@ function runUpdateCommand(command) {
  * why the endpoint that does it is loopback-only and needs an action token.
  */
 class UpdateManager {
-  constructor(config, options = {}) {
+  constructor(config = {}, options = {}) {
     this.config = config
     // A direct construction should not have to know the default source.
     this.source = options.source ?? config?.updateSource ?? UPDATE_SOURCE
@@ -2538,7 +2539,7 @@ class UpdateManager {
       latest: this.latest,
       updateAvailable,
       checkedAt: this.checkedAt,
-      source: this.config.updateSource,
+      source: this.source,
       error: this.lastError,
       install: {
         method,
@@ -3232,7 +3233,7 @@ function normalizeConfig(raw) {
       merged.statsArgs = config.opencodeStats.args
     }
     // Codex's model catalog lives in its own cache file, not in a CLI command.
-    if (id === 'codex' && !Array.isArray(merged.models)) {
+    if (id === 'codex' && typeof override?.readModels !== 'function') {
       merged.readModels = () => readCodexModelList(merged.modelsCacheFile ?? codexModelsCache)
     }
     providers[id] = merged

@@ -40,6 +40,17 @@ const { adapter, routes: routeNames } = mount({
 })
 
 assertEqual(routeNames, ['codex'], 'only the configured route is registered')
+
+const customCatalog = mount({ providers: {
+  opencode: false, grok: false,
+  codex: { bin: process.execPath, readModels: () => ['custom-codex-model'], modelsCacheFile: cache },
+} })
+assertEqual((await customCatalog.adapter.listModels('codex')).map((model) => model.id), ['custom-codex-model'], 'a custom Codex reader wins over the default cache reader')
+const emptyFilter = mount({ providers: {
+  opencode: false, grok: false,
+  codex: { bin: process.execPath, models: [], modelsCacheFile: cache },
+} })
+assertEqual((await emptyFilter.adapter.listModels('codex')).map((model) => model.id), ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-5.6-luna'], 'an empty model filter still honors the configured Codex cache file')
 assertEqual(adapter.providerInfo('codex').name, 'Codex (CLI)', 'provider info carries the display name')
 
 assertEqual(

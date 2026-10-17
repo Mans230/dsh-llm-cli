@@ -14,6 +14,17 @@ import { assert, assertEqual, assertMatch } from './_assert.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const stub = join(here, 'stubs', 'stub-cli.mjs')
+
+// A failed status command must not become a positive OpenCode sign-in result.
+const missingCli = new SignInManager({ cwd: here, providers: {
+  opencode: { bin: join(here, 'definitely-missing-auth-cli.exe') },
+} })
+assertEqual((await missingCli.status('opencode')).signedIn, false, 'a missing OpenCode CLI cannot report signed in')
+const failedProbe = new SignInManager({ cwd: here, providers: {
+  opencode: { bin: process.execPath, statusArgs: ['-e', "console.error('status probe failed');process.exit(1)"] },
+} })
+assertEqual((await failedProbe.status('opencode')).signedIn, false, 'a failed OpenCode status probe cannot report signed in')
+
 const flag = join(tmpdir(), `dsh-llm-cli-stub-flag-${process.pid}`)
 process.env.STUB_FLAG = flag
 rmSync(flag, { force: true })

@@ -112,9 +112,17 @@ if (mode === 'probes') {
     adapter.listCache.get('opencode').at=0;await adapter.listModels('opencode');assert.equal(reads,2)
     adapter.config.providers.opencode.readModels=()=>[];adapter.listCache.clear()
     assert.equal((await adapter.listModels('opencode'))[0].id,adapter.config.providers.opencode.defaultModel)
+    const loginFile=join(root,'waiting-login.mjs')
+    fs.writeFileSync(loginFile,"console.log('Open https://example.test/device?user_code=WAIT-1234');setTimeout(()=>{},60000)")
+    adapter.config.providers.opencode.statusArgs=['-e','process.exit(1)']
+    adapter.config.providers.opencode.loginArgs=[loginFile]
+    assert.match(await tools[0].execute({provider:'OPENCODE'}),/WAIT-1234/)
+    const pending=adapter.signIn.pending.get('opencode');assert(pending)
     for(const dispose of effects) dispose?.()
+    await pending.done
+    assert(pending.child.killed);assert.equal(adapter.signIn.pending.size,0)
     assert.equal(web.size,0)
-    return {webRoutesDisposed:4,hooks:'called against mock host; DSH integration unverified',adapterUnregister:'registerAdapter returns no disposer in current mount contract'}
+    return {webRoutesDisposed:4,activeLoginKilledOnDispose:true,hooks:'called against mock host; DSH integration unverified',adapterUnregister:'registerAdapter returns no disposer in current mount contract'}
   })
   await check('CLI list parser, broken shim, POSIX PATH lookup', async()=>{
     const root=scratch(),file=join(root,'models.mjs')
@@ -216,7 +224,13 @@ if(mode === 'source-scan'){
   command('rg',['-n','shell:|spawn\\(|spawnCommand\\(|timeoutMs|setTimeout|logger','index.js'])
   command('rg',['-n','cwd|usageFile|providers|timeoutMs|plan|grokUsageDir|codexUsageDir|codexModelsCache|opencodeStats|includeSystemPrompt|dashboardToken|signInTtlMs|autoUpdate|updateIntervalMs|updateSource|updateInstall','README.md','index.js'])
   command('gh',['run','list','--limit','3','--json','databaseId,headSha,status,conclusion'])
-  command('gh',['run','view','39063312822','--json','headSha,conclusion,jobs'])
+  const head = command('git',['rev-parse','HEAD']).stdout.trim()
+  const recent = command('gh',['run','list','--limit','20','--json','databaseId,headSha,status,conclusion'])
+  if (recent.status === 0) {
+    const run = JSON.parse(recent.stdout).find((entry) => entry.headSha === head)
+    if (run) command('gh',['run','view',String(run.databaseId),'--json','headSha,conclusion,jobs'])
+    else log({ ci: 'UNVERIFIED', reason: 'No recent run matches HEAD', head })
+  }
 }
 
 if (mode === 'real') {
@@ -278,6 +292,8 @@ if(mode === 'mutations'){
   fs.cpSync(join(repo,'test'),join(copy,'test'),{recursive:true})
   const cases=[
     ['adapter','index.js',"name: this.config.providers[provider]?.displayName ?? provider","name: 'BROKEN'"],
+    ['adapter','index.js',"if (id === 'codex' && typeof override?.readModels !== 'function') {","if (id === 'codex' && !Array.isArray(merged.models)) {"],
+    ['adapter','index.js',"if (id === 'codex' && typeof override?.readModels !== 'function') {","if (id === 'codex' && typeof override?.readModels !== 'function' && !Array.isArray(merged.models)) {"],
     ['client','client.js',"const inject = ['slots']","const inject = []"],
     ['contract','index.js',"export const name = 'llm-cli'","export const name = 'BROKEN'"],
     ['dashboard','index.js',"if (!auth.ok) {","if (false) {"],
@@ -288,12 +304,15 @@ if(mode === 'mutations'){
     ['failures','index.js',"const timeoutMs = Number.isFinite(route.timeoutMs) && route.timeoutMs > 0\n      ? route.timeoutMs\n      : this.config.timeoutMs","const timeoutMs = route.timeoutMs ?? this.config.timeoutMs"],
     ['ledger','index.js',"this.totals = readTotals(parsed?.totals) ?? totalsFrom(parsed?.entries)","this.totals = totalsFrom(parsed?.entries)"],
     ['signin','index.js',"const code = fromUrl ?? /\\b([A-Z0-9]{4}-[A-Z0-9]{4})\\b/.exec(text)?.[1]","const code = undefined"],
+    ['signin','index.js',"signedIn: code === 0 && signedIn(text)","signedIn: signedIn(text)"],
     ['signin','index.js',"if (this.pending.get(provider) === entry) this.pending.delete(provider)","/* retain a completed pending entry */"],
     ['dashboard','index.js',"ctx.logger?.info?.('llm-cli: usage dashboard at /llm-cli/usage')","ctx.logger?.info?.('llm-cli: usage dashboard at /llm-cli/usage ' + normalized.usageFile)"],
     ['views','index.js',"if (code !== 0) {\n    throw new Error((stderr || text)","if (false) {\n    throw new Error((stderr || text)"],
     ['views','index.js',"if (!stats?.tokens || !Number.isFinite(stats.tokens.input) || !Number.isFinite(stats.tokens.output)) {","if (false) {"],
     ['contract','index.js',"  UpdateManager,\n  readCodexModelList,","  readCodexModelList,"],
     ['update','index.js',"if (difference !== 0) return difference > 0 ? 1 : -1","if (difference !== 0) return difference > 0 ? -1 : 1"],
+    ['update','index.js',"source: this.source,","source: this.config.updateSource,"],
+    ['update','index.js',"constructor(config = {}, options = {}) {","constructor(config, options = {}) {"],
     ['usage','index.js',"contextWindow: lastContextWindow,","contextWindow: undefined,"],
     ['views','index.js',"usage = parsed.usageDelta ? addUsage(usage ?? {}, parsed.usage) : parsed.usage","usage = parsed.usage"],
   ]
