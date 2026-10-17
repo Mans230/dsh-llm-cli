@@ -423,6 +423,40 @@ window.__ModuleLoader__.load({
       const [tick, setTick] = React.useState(0)
       const [auto, setAuto] = React.useState(true)
       const [days, setDays] = React.useState(7)
+      // Updates are checked when asked, not on every page open, so opening the
+      // dashboard does not make a network call on someone else's behalf.
+      const [update, setUpdate] = React.useState({ status: 'idle' })
+
+      const checkForUpdates = () => {
+        setUpdate({ status: 'checking' })
+        fetch('/llm-cli/update.json?force=1', { headers: { accept: 'application/json' } })
+          .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
+          .then((result) => setUpdate({ status: 'ready', data: result }))
+          .catch((error) => setUpdate({ status: 'error', error: String((error && error.message) || error) }))
+      }
+
+      const applyUpdate = () => {
+        const token = update.data?.actionToken
+        if (!token) return
+        setUpdate({ status: 'applying', data: update.data })
+        fetch('/llm-cli/update', {
+          method: 'POST',
+          headers: { accept: 'application/json', 'x-llm-cli-update': token },
+        })
+          .then((response) => response.json())
+          .then((result) =>
+            setUpdate({
+              status: 'ready',
+              data: {
+                ...(update.data ?? {}),
+                ...(result.status ?? {}),
+                restartRequired: result.restartRequired,
+                lastResult: { at: Date.now(), ok: result.ok, command: result.command, output: result.output },
+              },
+            }),
+          )
+          .catch((error) => setUpdate({ status: 'error', error: String((error && error.message) || error) }))
+      }
 
       React.useEffect(() => {
         let live = true
@@ -776,6 +810,54 @@ window.__ModuleLoader__.load({
         }),
 
         h('p', { style: S.note }, data.limitsNotice ?? SUB),
+        h('div', { style: S.heading }, 'Plugin version'),
+        h(
+          'div',
+          null,
+          h(
+            'div',
+            { style: S.cards },
+            h(StatCard, {
+              label: 'Installed',
+              value: update.data?.current ?? '\u2014',
+              sub: update.data?.install?.detail ?? 'press check for updates',
+            }),
+            update.data?.latest
+              ? h(StatCard, {
+                  label: 'Newest published',
+                  value: update.data.latest,
+                  sub: update.data.updateAvailable ? 'an update is available' : 'this copy is current',
+                  tone: update.data.updateAvailable ? COLOR.warn : COLOR.output,
+                })
+              : null,
+          ),
+          h(
+            'p',
+            { style: S.note },
+            h(
+              'button',
+              { type: 'button', style: S.button, onClick: checkForUpdates },
+              update.status === 'checking' ? 'Checking\u2026' : 'Check for updates',
+            ),
+            update.data?.canApply && update.data?.updateAvailable
+              ? h(
+                  'button',
+                  { type: 'button', style: { ...S.button, marginLeft: '8px' }, onClick: applyUpdate },
+                  update.status === 'applying' ? 'Updating\u2026' : 'Update now',
+                )
+              : null,
+            update.status === 'error' ? ` ${update.error}` : '',
+            update.data?.restartRequired ? ' Restart the profile to load the new version.' : '',
+            update.data?.lastResult
+              ? ` Last run ${update.data.lastResult.ok ? 'succeeded' : 'failed'}: ${String(update.data.lastResult.output ?? '').slice(0, 300)}`
+              : '',
+            update.data
+              ? update.data.autoUpdate
+                ? ` Auto-update is on (${update.data.autoUpdate}).`
+                : ' Auto-update is off.'
+              : '',
+          ),
+        ),
         h(
           'p',
           { style: S.note },

@@ -9,7 +9,7 @@ Two ways to use it in a profile, both from the profile directory
 
 ```json
 {
-  "dependencies": { "dsh-llm-cli": "github:Mans230/dsh-llm-cli" },
+  "dependencies": { "dsh-llm-cli": "git+https://github.com/Mans230/dsh-llm-cli.git" },
   "dsh": {
     "profile": {
       "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-llm-cli"]

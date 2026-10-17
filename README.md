@@ -44,10 +44,15 @@ Wire it into a profile by adding it as a dependency and selecting its bundle:
 
 ```json
 {
-  "dependencies": { "dsh-llm-cli": "github:Mans230/dsh-llm-cli" },
+  "dependencies": { "dsh-llm-cli": "git+https://github.com/Mans230/dsh-llm-cli.git" },
   "dsh": { "profile": { "bundles": ["dsh-llm-cli"] } }
 }
 ```
+
+Use the `git+https` form rather than the `github:` shorthand. npm resolves the
+shorthand over SSH, which fails on a host with no GitHub key even though the
+repository is public. The update button retries over https when the shorthand
+fails, but starting from https avoids the round trip.
 
 or, in the Web UI, **Plugins → Add plugin** with this package's path. See
 [MOUNT-EXAMPLE.md](MOUNT-EXAMPLE.md) for the junction-based local install.
@@ -110,6 +115,14 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
   configured, so a stray `token=1` cannot unlock remote reads.
 - `signInTtlMs` — how long a device-code sign-in may wait for a human before the
   plugin closes it (default 10 minutes).
+- `autoUpdate` — `false` (default) makes no network calls. `'check'` looks for a
+  newer published version on a timer, `'apply'` installs it too.
+- `updateIntervalMs` — how often an auto-updating install checks (default 24
+  hours, minimum one minute).
+- `updateSource` — the URL the check reads a `package.json` from (default this
+  repository's copy on `main`).
+- `updateInstall` — `{ method: 'npm'|'git', dir, spec }` for a copy whose install
+  the plugin cannot work out by itself.
 
 ## What it adds
 
@@ -132,7 +145,15 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
   charts: daily tokens per CLI, an activity heatmap and token mix, cost by model,
   per-model usage tables, the real Codex 5-hour and weekly subscription-limit
   gauges, and — when `plan` budgets or `plan.grok.weeklyPremium` are configured —
-  used-vs-budget gauges.
+  used-vs-budget gauges. It also carries a **Check for updates** button and, when
+  a newer version exists, **Update now**.
+- `GET /llm-cli/update.json` and `POST /llm-cli/update` for the same two actions
+  from the server-rendered page. Both answer this machine only, and the POST
+  needs the action token the page or the JSON carries. The POST runs `npm install
+  <the spec your profile declares>` for a dependency install, or `git pull
+  --ff-only` in the checkout for a git install. **A restart of the profile is
+  what loads the new code**, so the update reports `restartRequired` rather than
+  pretending the running process changed.
 
 ## Usage data sources
 
@@ -212,6 +233,7 @@ builds synthetic Codex rollouts for the usage reader.
 | `test/failures.test.mjs` | CLI error events, timeouts, plain-text answers, a bad `cwd`, block indices |
 | `test/views.test.mjs` | per-CLI usage rules (step summing, single totals), capabilities, dashes |
 | `test/dashboard.test.mjs` | dashboard authorization (loopback, token, cookie) and the page refresh |
+| `test/update.test.mjs` | version compare, install detection, a real local git pull, a stub npm |
 | `test/contract.test.mjs` | the manifest and both halves' public exports |
 
 Every suite mounts through `test/_harness.mjs`, which gives it a scratch

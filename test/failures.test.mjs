@@ -148,6 +148,17 @@ if (process.platform === 'win32') {
   assertEqual(resolved.bin, process.execPath, 'a shim to a script resolves to node')
   assertEqual(resolved.prefix, [inner], 'the script is passed before the CLI arguments')
 
+  // npm's own shim assigns its node and its script to variables first. The
+  // script it runs last is the target, not the node it assigns first.
+  const assignedShim = join(shimDir, 'assigned.cmd')
+  writeFileSync(
+    assignedShim,
+    `@ECHO off\r\nSET "NODE_EXE=%~dp0\\node.exe"\r\nSET "PREFIX_JS=%~dp0\\inner.mjs"\r\nSET "CLI_JS=%~dp0\\inner.mjs"\r\n"%NODE_EXE%" "%CLI_JS%" %*\r\n`,
+  )
+  const assignedResolved = resolveWindowsShim(assignedShim)
+  assertEqual(assignedResolved.prefix, [inner], 'an assigned script is the target, not the assigned node')
+  assertEqual(assignedResolved.bin, process.execPath, 'an assigned script runs under node')
+
   // A bare name must be found on PATH the way a shell would find it.
   const savedPath = process.env.PATH
   process.env.PATH = `${shimDir}${delimiter}${savedPath}`

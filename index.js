@@ -18,11 +18,13 @@ import { createInterface } from 'node:readline'
 import {
   closeSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -32,6 +34,7 @@ import {
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 export const name = 'llm-cli'
 export const inject = ['llm']
@@ -53,6 +56,14 @@ const TICKS_PER_USD = 1e10
 const DEFAULT_SIGN_IN_TTL_MS = 10 * 60 * 1000
 /** A dashboard token shorter than this is not worth calling a secret. */
 const MIN_DASHBOARD_TOKEN = 16
+/** Where an update check reads the published version from. */
+const UPDATE_SOURCE = 'https://raw.githubusercontent.com/Mans230/dsh-llm-cli/main/package.json'
+/** A check result is reused this long, so a click cannot hammer the source. */
+const UPDATE_TTL_MS = 10 * 60 * 1000
+/** How long an install command may run before it is killed. */
+const UPDATE_TIMEOUT_MS = 3 * 60 * 1000
+/** How often an auto-updating install looks for a new version. */
+const DEFAULT_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000
 
 /** Resolve a path under %APPDATA% without importing when the env var is absent. */
 function appDataPath(...parts) {
@@ -1268,6 +1279,19 @@ function runCapture(route, args, { cwd, timeoutMs }) {
 }
 
 /**
+ * A PATH entry can arrive POSIX-shaped when the harness was launched from a
+ * shell that rewrites PATH (git-bash, WSL interop). Native lookup needs a
+ * Windows path, so translate those entries instead of failing every probe.
+ */
+function windowsPathEntry(dir) {
+  const wsl = /^\/mnt\/([a-zA-Z])\/(.*)$/.exec(dir)
+  if (wsl) return `${wsl[1].toUpperCase()}:\\${wsl[2].replace(/\//g, '\\')}`
+  const msys = /^\/([a-zA-Z])\/(.*)$/.exec(dir)
+  if (msys) return `${msys[1].toUpperCase()}:\\${msys[2].replace(/\//g, '\\')}`
+  return dir
+}
+
+/**
  * Find a bare command on PATH the way a shell would, including the `.cmd` shims
  * npm installs. Node's own spawn lookup only finds executables, so without this
  * a globally installed CLI that ships nothing but a shim is invisible.
@@ -1278,7 +1302,7 @@ function findOnPath(name) {
   const extensions = (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
   for (const dir of dirs) {
     for (const extension of extensions) {
-      const candidate = join(dir, `${name}${extension.toLowerCase()}`)
+      const candidate = join(windowsPathEntry(dir), `${name}${extension.toLowerCase()}`)
       try {
         if (existsSync(candidate)) return candidate
       } catch {
@@ -1293,8 +1317,12 @@ function findOnPath(name) {
  * Node cannot spawn a `.cmd` or `.bat` without a shell, and a shell would put
  * the prompt on a command line where `&` and `|` mean something. The shim is a
  * text file that names its real target, so read it and launch that instead.
- * Returns null when the shim cannot be read, and the caller then explains
- * itself rather than falling back to a shell.
+ *
+ * npm's own shim assigns a variable first (`SET "NODE_EXE=%~dp0\node.exe"`) and
+ * runs the script last, so every quoted candidate is collected: assignments are
+ * skipped, a script wins over an executable, and the first target that exists is
+ * used. Returns null when nothing resolves, and the caller then explains itself
+ * rather than falling back to a shell.
  */
 function resolveWindowsShim(bin) {
   if (process.platform !== 'win32' || !/\.(cmd|bat)$/i.test(bin)) return { bin, prefix: [] }
@@ -1304,15 +1332,40 @@ function resolveWindowsShim(bin) {
   } catch {
     return null
   }
-  const match = /"([^"]+\.(?:exe|js|mjs|cjs))"/i.exec(text)
-  if (!match) return null
-  const relative = match[1].replace(/%~dp0\\?/gi, '').replace(/%dp0%\\?/gi, '')
-  const target = isAbsolute(relative) ? relative : join(dirname(bin), relative)
-  try {
-    if (!existsSync(target)) return null
-  } catch {
-    return null
+  // Two kinds of quoted target: one the shim runs directly, and one it assigns
+  // to a variable first. npm uses the second form for both its node and its
+  // script, so an assigned target is used when there is no direct one.
+  const direct = []
+  const assigned = []
+  for (const match of text.matchAll(/"([^"\r\n]+)"/g)) {
+    const quoted = match[1]
+    const isAssignment = quoted.includes('=')
+    const value = (isAssignment ? quoted.slice(quoted.indexOf('=') + 1) : quoted).trim()
+    if (!/\.(exe|js|mjs|cjs)$/i.test(value)) continue
+    const relative = value.replace(/%~dp0\\?/gi, '').replace(/%dp0%\\?/gi, '').replace(/%[^%]*%/g, '')
+    if (!relative || relative.includes('%')) continue
+    const target = isAbsolute(relative) ? relative : join(dirname(bin), relative)
+    try {
+      if (existsSync(target)) (isAssignment ? assigned : direct).push(target)
+    } catch {
+      /* skip an entry the filesystem will not answer for */
+    }
   }
+  // A shim hands off on its last line, so the last matching target wins. npm
+  // assigns a prefix helper before its real entry, and the later assignment is
+  // the one it runs.
+  const pick = (list, pattern) => {
+    for (let index = list.length - 1; index >= 0; index -= 1) {
+      if (pattern.test(list[index])) return list[index]
+    }
+    return undefined
+  }
+  const target =
+    pick(direct, /\.(js|mjs|cjs)$/i) ??
+    pick(direct, /\.exe$/i) ??
+    pick(assigned, /\.(js|mjs|cjs)$/i) ??
+    pick(assigned, /\.exe$/i)
+  if (!target) return null
   return /\.exe$/i.test(target) ? { bin: target, prefix: [] } : { bin: process.execPath, prefix: [target] }
 }
 
@@ -2223,6 +2276,305 @@ function stamp(at) {
   return new Date(at).toLocaleString('en-GB', { hour12: false })
 }
 
+/**
+ * Compare two dotted versions. Returns 1 when `a` is newer, -1 when older, and
+ * 0 when they match. A pre-release suffix is ignored, so 1.2.3 and 1.2.3-beta
+ * compare equal and an update is not offered for a suffix change.
+ */
+function compareVersions(a, b) {
+  const parse = (value) =>
+    String(value ?? '')
+      .split('-')[0]
+      .split('.')
+      .map((part) => Number.parseInt(part, 10) || 0)
+  const left = parse(a)
+  const right = parse(b)
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const difference = (left[index] ?? 0) - (right[index] ?? 0)
+    if (difference !== 0) return difference > 0 ? 1 : -1
+  }
+  return 0
+}
+
+/** The version this copy of the plugin reports. */
+function currentVersion() {
+  const manifest = readJsonFile(join(pluginDir(), 'package.json'))
+  return typeof manifest?.version === 'string' ? manifest.version : '0.0.0'
+}
+
+/** The directory this module was loaded from. */
+function pluginDir() {
+  return dirname(fileURLToPath(import.meta.url))
+}
+
+function readJsonFile(file) {
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+/** The nearest ancestor directory that is a DSH profile. */
+function findProfileDir(startDir) {
+  let dir = startDir
+  for (let depth = 0; depth < 10; depth += 1) {
+    const manifest = readJsonFile(join(dir, 'package.json'))
+    if (manifest?.dsh?.profile) return { dir, manifest }
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return null
+}
+
+/**
+ * How this copy was installed, which decides how it can be updated. An npm
+ * dependency is refreshed with the spec the profile already declares, so a fork
+ * or a private mirror keeps working. A checkout, or a junction to one, is
+ * refreshed with a fast-forward pull.
+ */
+function detectInstall(startDir = pluginDir(), cwd = process.cwd()) {
+  const profile = findProfileDir(startDir) ?? findProfileDir(cwd)
+  if (profile) {
+    const spec = profile.manifest?.dependencies?.['dsh-llm-cli']
+    if (typeof spec === 'string' && spec.length > 0) {
+      return { method: 'npm', dir: profile.dir, spec, profile: profile.dir }
+    }
+    const linked = join(profile.dir, 'node_modules', 'dsh-llm-cli')
+    let target = null
+    try {
+      if (lstatSync(linked).isSymbolicLink()) target = realpathSync(linked)
+    } catch {
+      target = null
+    }
+    if (target && existsSync(join(target, '.git'))) {
+      return { method: 'git', dir: target, profile: profile.dir }
+    }
+    if (profile.dir) return { method: 'unknown', dir: profile.dir, profile: profile.dir }
+  }
+  if (existsSync(join(startDir, '.git'))) return { method: 'git', dir: startDir }
+  return { method: 'unknown', dir: startDir }
+}
+
+/** The command that refreshes this install, or null when there is none. */
+function updateCommand(install) {
+  if (install?.method === 'npm' && install.spec) {
+    return { bin: 'npm', args: ['install', install.spec], cwd: install.dir }
+  }
+  if (install?.method === 'git' && install.dir) {
+    return { bin: 'git', args: ['-C', install.dir, 'pull', '--ff-only'], cwd: install.dir }
+  }
+  return null
+}
+
+/**
+ * Pull the owner, repository and ref out of any GitHub spec a profile might
+ * declare: the shorthand, a `git+https` URL, or a plain URL.
+ */
+function githubRepo(spec) {
+  const value = String(spec ?? '').trim()
+  const patterns = [
+    /^(?:github:)?([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:#(.+))?$/,
+    /^git\+(?:https|ssh):\/\/github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?(?:#(.+))?$/,
+    /^https?:\/\/github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?(?:#(.+))?$/,
+  ]
+  for (const pattern of patterns) {
+    const match = pattern.exec(value)
+    if (match) return { owner: match[1], repo: match[2], ref: match[3] }
+  }
+  return null
+}
+
+/**
+ * npm resolves a `github:owner/repo` shorthand over SSH, which fails on a host
+ * with no key even when the repository is public. npm 11 also rewrites an
+ * explicit `git+https` GitHub URL to ssh, so a git URL is not a reliable second
+ * attempt either. The tarball endpoint needs no git and no credentials at all.
+ */
+function httpsFallbackSpec(spec) {
+  const found = githubRepo(spec)
+  return found ? `git+https://github.com/${found.owner}/${found.repo}.git${found.ref ? `#${found.ref}` : ''}` : null
+}
+
+function tarballFallbackUrl(spec) {
+  const found = githubRepo(spec)
+  if (!found) return null
+  return `https://github.com/${found.owner}/${found.repo}/tarball/${found.ref ?? 'HEAD'}`
+}
+
+/**
+ * The install commands to try in order for a dependency install. The declared
+ * spec comes first, because a fork or a private mirror must keep working.
+ */
+function updateAttempts(install) {
+  if (install?.method !== 'npm') return [updateCommand(install)].filter(Boolean)
+  const specs = [install.spec, httpsFallbackSpec(install.spec), tarballFallbackUrl(install.spec)]
+  const seen = new Set()
+  const attempts = []
+  for (const spec of specs) {
+    if (!spec || seen.has(spec)) continue
+    seen.add(spec)
+    attempts.push({ bin: 'npm', args: ['install', spec], cwd: install.dir })
+  }
+  return attempts
+}
+
+/** Run an update command to completion, keeping the tail of its output. */
+function runUpdateCommand(command) {
+  return new Promise((resolve) => {
+    let child
+    try {
+      const launch = resolveWindowsShim(findOnPath(command.bin) ?? command.bin) ?? { bin: command.bin, prefix: [] }
+      child = spawn(launch.bin, [...launch.prefix, ...command.args], {
+        cwd: command.cwd,
+        windowsHide: true,
+        env: process.env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    } catch (error) {
+      resolve({ ok: false, code: null, output: String(error?.message ?? error) })
+      return
+    }
+    let output = ''
+    const collect = (chunk) => {
+      output += chunk
+    }
+    child.stdout?.setEncoding('utf8')
+    child.stderr?.setEncoding('utf8')
+    child.stdout?.on('data', collect)
+    child.stderr?.on('data', collect)
+    const timer = setTimeout(() => child.kill(), UPDATE_TIMEOUT_MS)
+    const finish = (code, error) => {
+      clearTimeout(timer)
+      resolve({
+        ok: code === 0 && !error,
+        code,
+        output: `${error ? `${error.message}\n` : ''}${output}`.trim().slice(-4000),
+      })
+    }
+    child.on('close', (code) => finish(code))
+    child.on('error', (error) => finish(null, error))
+  })
+}
+
+/**
+ * Checks for a newer published version and, when asked, installs it. Reading
+ * the version is one GET; installing runs npm or git in the profile, which is
+ * why the endpoint that does it is loopback-only and needs an action token.
+ */
+class UpdateManager {
+  constructor(config, options = {}) {
+    this.config = config
+    this.install = options.install ?? detectInstall()
+    this.logger = options.logger
+    this.actionToken = randomUUID()
+    this.latest = null
+    this.lastError = ''
+    this.checkedAt = 0
+    this.applying = false
+    this.restartRequired = false
+    this.lastResult = null
+    this.pending = null
+  }
+
+  /** Ask the source for the published version, reusing a recent answer. */
+  async check({ force = false } = {}) {
+    if (!force && this.checkedAt > 0 && Date.now() - this.checkedAt < UPDATE_TTL_MS) return this.status()
+    if (this.pending) return this.pending
+    this.pending = (async () => {
+      try {
+        const response = await fetch(this.config.updateSource, {
+          signal: AbortSignal.timeout(10000),
+          headers: { accept: 'application/json' },
+        })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const manifest = await response.json()
+        this.latest = typeof manifest?.version === 'string' ? manifest.version : null
+        this.lastError = this.latest ? '' : 'the update source has no version field'
+      } catch (error) {
+        this.lastError = String(error?.message ?? error)
+      } finally {
+        this.checkedAt = Date.now()
+        this.pending = null
+      }
+      return this.status()
+    })()
+    return this.pending
+  }
+
+  status() {
+    const current = currentVersion()
+    const command = updateCommand(this.install)
+    const updateAvailable = Boolean(this.latest) && compareVersions(this.latest, current) > 0
+    const method = this.install?.method ?? 'unknown'
+    return {
+      current,
+      latest: this.latest,
+      updateAvailable,
+      checkedAt: this.checkedAt,
+      source: this.config.updateSource,
+      error: this.lastError,
+      install: {
+        method,
+        dir: this.install?.dir,
+        detail:
+          method === 'npm'
+            ? `npm dependency "${this.install.spec}" in ${this.install.dir}`
+            : method === 'git'
+              ? `git checkout at ${this.install.dir}`
+              : 'no known install path',
+      },
+      canApply: Boolean(command) && !this.applying,
+      autoUpdate: this.config.autoUpdate,
+      applying: this.applying,
+      restartRequired: this.restartRequired,
+      actionToken: this.actionToken,
+      lastResult: this.lastResult,
+      note: command
+        ? `Update runs ${command.bin} ${command.args.join(' ')} in ${command.cwd}, then restart the profile to load it.`
+        : method === 'unknown'
+          ? 'This copy was not installed as a profile dependency or a git checkout, so update it by hand.'
+          : 'No update path is available.',
+    }
+  }
+
+  /** Install the newest version. Returns the command result. */
+  async apply() {
+    if (this.applying) return { ok: false, output: 'an update is already running' }
+    const command = updateCommand(this.install)
+    if (!command) {
+      const output = 'this install has no known update path, so update it by hand'
+      this.lastResult = { at: Date.now(), ok: false, command: '', output }
+      return this.lastResult
+    }
+    this.applying = true
+    try {
+      const attempts = updateAttempts(this.install)
+      let result = { ok: false, code: null, output: 'no update command is available' }
+      const tried = []
+      for (const attempt of attempts) {
+        tried.push(`${attempt.bin} ${attempt.args.join(' ')}`)
+        result = await runUpdateCommand(attempt)
+        if (result.ok) break
+      }
+      this.restartRequired = result.ok
+      // The published version may now be what is installed, so drop the cache.
+      this.latest = null
+      this.checkedAt = 0
+      this.lastResult = {
+        at: Date.now(),
+        ok: result.ok,
+        command: tried.join(' ; '),
+        output: result.output || `exit ${result.code}`,
+      }
+      return this.lastResult
+    } finally {
+      this.applying = false
+    }
+  }
+}
+
 /** True when the request came from this machine. */
 function isLoopbackRequest(request) {
   const raw = String(request?.socket?.remoteAddress ?? '')
@@ -2281,6 +2633,27 @@ function authorizeDashboard(request, token) {
       ? `llm_cli_token=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/llm-cli`
       : undefined,
   }
+}
+
+/** Read a small request body, from a stream or from a test's plain object. */
+function readRequestBody(request, limit = 4096) {
+  return new Promise((resolve) => {
+    if (typeof request?.body === 'string') {
+      resolve(request.body.slice(0, limit))
+      return
+    }
+    if (typeof request?.on !== 'function') {
+      resolve('')
+      return
+    }
+    let data = ''
+    request.on('data', (chunk) => {
+      data += chunk
+      if (data.length > limit) request.destroy?.()
+    })
+    request.on('end', () => resolve(data.slice(0, limit)))
+    request.on('error', () => resolve(''))
+  })
 }
 
 /** Parse `?refresh=off`, so an operator can stop the page reloading itself. */
@@ -2601,6 +2974,39 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans, 
             : ''
         }`
       : ''
+  const update = options.update
+  const updateSection = update
+    ? `<h2>Updates</h2>
+<div class="card" style="max-width:900px">
+  <div class="k">This copy is <strong>${escapeHtml(update.current)}</strong>${
+    update.latest ? ` · newest published is <strong>${escapeHtml(update.latest)}</strong>` : ''
+  } · ${update.checkedAt ? `checked ${escapeHtml(stamp(update.checkedAt))}` : 'not checked yet'}</div>
+  <div class="k" style="margin-top:6px">${escapeHtml(update.error ? `check failed: ${update.error}` : update.note)}</div>
+  <div class="k" style="margin-top:6px">installed as ${escapeHtml(update.install?.detail ?? 'unknown')} · auto-update: ${escapeHtml(
+    update.autoUpdate || 'off',
+  )}</div>
+  <div style="margin-top:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    <a href="/llm-cli/usage?check=1" style="color:#6fb3ff">check for updates</a>
+    ${
+      update.actionToken && update.canApply && update.updateAvailable
+        ? `<form method="post" action="/llm-cli/update" style="display:inline"><input type="hidden" name="token" value="${escapeHtml(
+            update.actionToken,
+          )}"><button type="submit" class="btn">Update now</button></form>`
+        : ''
+    }
+  </div>
+  ${update.restartRequired ? '<div class="k" style="margin-top:6px">Restart the profile to load the new version.</div>' : ''}
+  ${
+    update.lastResult
+      ? `<div class="k" style="margin-top:6px">last run ${escapeHtml(stamp(update.lastResult.at))}: ${
+          update.lastResult.ok ? 'ok' : 'failed'
+        } · <code>${escapeHtml(update.lastResult.command || 'no command')}</code></div><pre class="log">${escapeHtml(
+          update.lastResult.output,
+        )}</pre>`
+      : ''
+  }
+</div>`
+    : ''
   const windowDaysShown = cliUsage?.windowDays ?? 0
   const windowLabel = cliUsage?.windowLabel ?? windowLabelFor(windowDaysShown)
   const windowLink = (query, text) =>
@@ -2651,6 +3057,8 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans, 
   .chart { background: #171a21; border: 1px solid #232833; border-radius: 10px; padding: 8px 6px 2px; }
   .cli-models h2 { margin-top: 20px; }
   code { background: #171a21; border: 1px solid #232833; border-radius: 6px; padding: 1px 5px; }
+  .btn { font: inherit; font-size: 12px; padding: 4px 12px; border-radius: 7px; border: 1px solid #2a3140; background: #1b202a; color: inherit; cursor: pointer; }
+  .log { background: #12151c; border: 1px solid #232833; border-radius: 8px; padding: 8px; font-size: 11px; max-height: 200px; overflow: auto; white-space: pre-wrap; }
 </style>
 </head>
 <body>
@@ -2670,6 +3078,7 @@ ${limitRows ? `<h2>Model limits</h2>
 <thead><tr><th>Route</th><th>Model</th><th>Context window</th><th>Max output</th><th>Source</th></tr></thead>
 <tbody>${limitRows}</tbody>
 </table></div>` : ''}
+${updateSection}
 ${notice ? `<p class="note">${escapeHtml(notice)}</p>` : ''}
 <h2>By provider</h2>
 <div class="wrap"><table>
@@ -2829,6 +3238,29 @@ function normalizeConfig(raw) {
       Number.isFinite(config.signInTtlMs) && config.signInTtlMs > 0
         ? config.signInTtlMs
         : DEFAULT_SIGN_IN_TTL_MS,
+    updateSource:
+      typeof config.updateSource === 'string' && config.updateSource.length > 0 ? config.updateSource : UPDATE_SOURCE,
+    // false (default) never touches the network. 'check' looks for a version,
+    // 'apply' installs it. `true` is accepted as 'apply'.
+    autoUpdate:
+      config.autoUpdate === true || config.autoUpdate === 'apply'
+        ? 'apply'
+        : config.autoUpdate === 'check'
+          ? 'check'
+          : false,
+    updateIntervalMs:
+      Number.isFinite(config.updateIntervalMs) && config.updateIntervalMs >= 60000
+        ? config.updateIntervalMs
+        : DEFAULT_UPDATE_INTERVAL_MS,
+    // An operator whose install detection gets wrong can say how to update.
+    updateInstall:
+      config.updateInstall && typeof config.updateInstall === 'object' && (config.updateInstall.method === 'npm' || config.updateInstall.method === 'git')
+        ? {
+            method: config.updateInstall.method,
+            dir: typeof config.updateInstall.dir === 'string' ? config.updateInstall.dir : undefined,
+            spec: typeof config.updateInstall.spec === 'string' ? config.updateInstall.spec : undefined,
+          }
+        : null,
     providers,
   }
 }
@@ -2843,6 +3275,38 @@ export function apply(ctx, config) {
   }
   const manager = new SignInManager(normalized)
   const ledger = new UsageLedger(normalized.usageFile)
+  const updates = new UpdateManager(normalized, {
+    logger: ctx.logger,
+    install: normalized.updateInstall ?? undefined,
+  })
+
+  // An auto-updating install checks on its own. Nothing here runs unless the
+  // profile asked for it, so the plugin still makes no network calls by default.
+  if (normalized.autoUpdate) {
+    const tick = async () => {
+      try {
+        const status = await updates.check({ force: true })
+        if (status.updateAvailable && status.canApply && normalized.autoUpdate === 'apply') {
+          const result = await updates.apply()
+          ctx.logger?.[result.ok ? 'info' : 'warn']?.(
+            `llm-cli: auto-update ${result.ok ? 'installed' : 'failed'}: ${result.command || result.output}`,
+          )
+        } else if (status.updateAvailable) {
+          ctx.logger?.info?.(`llm-cli: version ${status.latest} is available (this copy is ${status.current})`)
+        }
+      } catch {
+        /* the next tick tries again */
+      }
+    }
+    const first = setTimeout(tick, 5000)
+    const repeater = setInterval(tick, normalized.updateIntervalMs)
+    first.unref?.()
+    repeater.unref?.()
+    ctx.effect?.(() => () => {
+      clearTimeout(first)
+      clearInterval(repeater)
+    })
+  }
   const adapter = new CliAdapter(ctx, normalized, manager, ledger)
   ctx.llm.registerAdapter(routeNames, adapter)
 
@@ -2875,7 +3339,18 @@ export function apply(ctx, config) {
         path: '/llm-cli/usage',
         handler: guard(async (request, response) => {
           try {
+            let url
+            try {
+              url = new URL(request?.url ?? '', 'http://localhost')
+            } catch {
+              url = new URL('http://localhost/llm-cli/usage')
+            }
+            if (url.searchParams.has('check')) await updates.check({ force: true })
             const payload = await describeRoutes(adapter, ledger, windowDaysFromUrl(request?.url))
+            // Another machine may read the numbers with a token, but the update
+            // action token stays on this host.
+            const updateView = updates.status()
+            if (!isLoopbackRequest(request)) updateView.actionToken = ''
             response.writeHead(200, {
               'content-type': 'text/html; charset=utf-8',
               'cache-control': 'no-store',
@@ -2883,6 +3358,7 @@ export function apply(ctx, config) {
             response.end(
               renderUsageHtml(payload, Date.now(), payload.routes, payload.limitsNotice, payload.cliUsage, payload.plans, {
                 autoRefresh: autoRefreshFromUrl(request?.url),
+                update: updateView,
               }),
             )
           } catch (error) {
@@ -2908,6 +3384,72 @@ export function apply(ctx, config) {
           }
         }),
       }),
+      child.webServer.register({
+        kind: 'exact',
+        path: '/llm-cli/update.json',
+        handler: async (request, response) => {
+          // The status carries the install path and the action token, so this
+          // one never answers another machine, token or not.
+          if (!isLoopbackRequest(request)) {
+            response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+            response.end('llm-cli: the update endpoint answers this machine only\n')
+            return
+          }
+          let force = false
+          try {
+            force = new URL(request?.url ?? '', 'http://localhost').searchParams.has('force')
+          } catch {
+            force = false
+          }
+          const status = await updates.check({ force })
+          response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+          response.end(JSON.stringify(status))
+        },
+      }),
+      child.webServer.register({
+        kind: 'exact',
+        path: '/llm-cli/update',
+        handler: async (request, response) => {
+          const wantsJson = String(request?.headers?.accept ?? '').includes('application/json')
+          const reply = (code, payload) => {
+            if (wantsJson) {
+              response.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+              response.end(JSON.stringify(payload))
+              return
+            }
+            const body = `<pre>${escapeHtml(payload.output ?? '')}</pre>`
+            response.writeHead(code, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+            response.end(
+              `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>llm-cli update</title></head><body style="font:14px/1.5 ui-sans-serif,system-ui;background:#0f1115;color:#e6e8eb;padding:24px"><p>${payload.ok ? 'Update finished.' : 'Update did not finish.'}</p>${body}${
+                payload.restartRequired ? '<p>Restart the profile to load the new version.</p>' : ''
+              }<p><a href="/llm-cli/usage" style="color:#6fb3ff">back to the dashboard</a></p></body></html>`,
+            )
+          }
+          if (!isLoopbackRequest(request)) {
+            reply(403, { ok: false, output: 'the update endpoint answers this machine only' })
+            return
+          }
+          if (String(request?.method ?? '').toUpperCase() !== 'POST') {
+            reply(405, { ok: false, output: 'POST to this path to update' })
+            return
+          }
+          // A cross-site form can post, but it cannot read the token, and a
+          // cross-site fetch cannot set the header without a preflight.
+          let token = String(request?.headers?.['x-llm-cli-update'] ?? '')
+          if (!token) {
+            const body = await readRequestBody(request)
+            token = new URLSearchParams(body).get('token') ?? ''
+          }
+          const given = Buffer.from(token)
+          const expected = Buffer.from(updates.actionToken)
+          if (given.length !== expected.length || !timingSafeEqual(given, expected)) {
+            reply(403, { ok: false, output: 'a valid action token is required' })
+            return
+          }
+          const result = await updates.apply()
+          reply(200, { ...result, restartRequired: updates.restartRequired, status: updates.status() })
+        },
+      }),
     ]
     child.effect(() => () => {
       for (const dispose of disposers) dispose()
@@ -2922,14 +3464,18 @@ export function apply(ctx, config) {
 
 export {
   buildTools,
+  compareVersions,
   computePlans,
   describeRoutes,
+  detectInstall,
   parseDeviceInfo,
   periodWindow,
   readGrokCliUsage,
   readGrokModelLimits,
   readCodexCliUsage,
   resolveWindowsShim,
+  updateCommand,
+  UpdateManager,
   readCodexModelList,
   renderUsageHtml,
   SignInManager,

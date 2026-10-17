@@ -6,6 +6,41 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0]
+
+### Added
+
+- **A check-for-updates button, and one-click update.** The plugin's page in the
+  Web client, and the server-rendered dashboard, now show the installed version,
+  the newest published one, and how this copy was installed. The button runs the
+  command that suits that install: `npm install <the spec your profile already
+  declares>` for a dependency, or `git pull --ff-only` for a checkout or a
+  junction to one.
+- `GET /llm-cli/update.json` and `POST /llm-cli/update`, both of which answer
+  this machine only. The POST needs an action token that the page carries, so a
+  cross-site form cannot trigger it.
+- `autoUpdate` (`false`, `'check'` or `'apply'`), `updateIntervalMs`,
+  `updateSource` and `updateInstall`. The default makes no network calls, so the
+  version check happens only when you ask for it.
+- `test/update.test.mjs` covers version comparison, install detection, a real
+  local `git pull` through the update path, and the npm command shape.
+
+### Fixed
+
+- **The npm shim is resolved correctly.** npm's own `.cmd` assigns its node and
+  its script to variables before running them, which the previous pattern read as
+  the target. It now picks the script the shim actually runs, which is what makes
+  an install that ships only a shim reachable at all.
+- **A POSIX-shaped PATH entry no longer defeats command lookup.** A harness
+  launched from git-bash or WSL interop hands Node `/c/...` entries, which no
+  native probe can join. Those entries are translated first.
+- **A GitHub install that git cannot fetch is retried as a tarball.** npm
+  resolves `github:owner/repo` over SSH, which fails without a key even for a
+  public repository, and npm 11 rewrites an explicit `git+https` URL to ssh as
+  well. The update path now tries the declared spec, then the https git URL, then
+  `https://github.com/owner/repo/tarball/HEAD`, which needs no git and no
+  credentials. The README recommends the https form directly.
+
 ## [0.6.0]
 
 ### Fixed
