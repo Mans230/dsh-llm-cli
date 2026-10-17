@@ -8,14 +8,29 @@ All notable changes to this plugin are documented here. The format follows
 
 ### Added
 
+- Read OpenCode's native model catalog, cap context at 500,000 without
+  inflating smaller models, and preserve million-token free models and native
+  output limits. Configured per-model limits retain precedence.
+- Resolve session workspaces from the DSH session service; forward system
+  instructions by default; allow Codex's workspace-write sandbox explicitly.
+- Relay offered harness tool requests and correlated results using a validated
+  JSON protocol. Send actual image attachments through Codex/OpenCode flags
+  and Grok ACP stdin, with temporary-file cleanup and explicit failures.
+- Display Codex quota observation times and stale status. Manual refresh
+  invalidates caches and rereads CLI files, including quota-only rollouts;
+  it does not claim to query live account quota.
+
 - `providers.<id>.models` accepts an object entry (`{ id, name?, contextWindow?,
   maxOutputTokens? }`) beside the bare model id it already took. It exists for
-  routes whose CLI publishes ids but no limits — every OpenCode model otherwise
-  reported the 200,000-token harness default — and a configured entry wins over
+  explicit model limits; previously OpenCode otherwise reported the
+  200,000-token harness default. A configured entry wins over
   the route's `contextWindow` and over a CLI cache. The dashboard labels such a
   row `configured for this model`.
 
 ### Fixed
+
+- Subtract cached input at the Codex stream boundary to match DSH's disjoint
+  token counters, while preserving Codex rollout readers' native accounting.
 
 - Failed or missing CLI authentication probes no longer report OpenCode as
   signed in merely because their output lacks a signed-out phrase.

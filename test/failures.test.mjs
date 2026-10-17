@@ -191,7 +191,11 @@ for (const [label, tail] of [
 // An already-cancelled call must never start a CLI, and cancellation is ledgered.
 const controller = new AbortController()
 controller.abort()
+let resolvedAfterAbort=false
+adapter.config.resolveCwd=()=>{resolvedAfterAbort=true;return root}
 const preAborted = await drain(adapter, { ...turn('opencode', 'm'), signal: controller.signal })
+assertEqual(resolvedAfterAbort,false,'an already aborted call does not resolve a workspace')
+adapter.config.resolveCwd=undefined
 assertEqual(preAborted.chunks.at(-1)?.reason?.kind, 'aborted', 'an already aborted call finishes aborted')
 assertEqual(textOf(preAborted), '', 'an already aborted call runs no CLI')
 assertEqual(adapter.ledger.summary().recent[0].ok, false, 'an already aborted call is ledgered as failed')

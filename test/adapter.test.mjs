@@ -83,7 +83,7 @@ assertEqual(
 )
 assertEqual(
   chunks.find((c) => c.type === 'usage')?.usage,
-  { inputTokens: 1000, outputTokens: 20, cacheReadTokens: 500, cacheWriteTokens: 0, reasoningTokens: 7, totalTokens: 1020 },
+  { inputTokens: 500, outputTokens: 20, cacheReadTokens: 500, cacheWriteTokens: 0, reasoningTokens: 7, totalTokens: 1020 },
   'codex usage is mapped onto the harness vocabulary',
 )
 

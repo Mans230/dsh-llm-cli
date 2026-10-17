@@ -63,7 +63,7 @@ writeCli(
 const codexTurn = await drain(codex.adapter, turn('codex', 'gpt-6.1-sol'))
 assertEqual(
   codexTurn.chunks.find((chunk) => chunk.type === 'usage')?.usage,
-  { inputTokens: 1000, outputTokens: 20, cacheReadTokens: 500, cacheWriteTokens: 0, reasoningTokens: 7, totalTokens: 1020 },
+  { inputTokens: 500, outputTokens: 20, cacheReadTokens: 500, cacheWriteTokens: 0, reasoningTokens: 7, totalTokens: 1020 },
   'a single per-turn total is reported once, not doubled',
 )
 assertEqual(codex.adapter.ledger.summary().providers[0].costTurns, 0, 'a turn with no cost is not a costed turn')

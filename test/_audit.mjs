@@ -6,6 +6,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import vm from 'node:vm'
+import { createRequire } from 'node:module'
+import { redPng } from './_image.mjs'
 import assert from 'node:assert/strict'
 import * as host from '../index.js'
 import { mount, drain, turn, writeCli, textOf } from './_harness.mjs'
@@ -28,6 +30,65 @@ async function check(label, run) {
   catch (error) { log({ check: label, result: 'FAIL', error: error.stack }); process.exitCode = 1 }
 }
 absent()
+
+if(mode === 'runtime'){
+  assert(process.env.DSH_RUNTIME_DIR,'set DSH_RUNTIME_DIR to an isolated install of the published DSH services')
+  const req=createRequire(join(process.env.DSH_RUNTIME_DIR,'package.json'))
+  const {Context}=await import(pathToFileURL(req.resolve('@deepseek-ai/cordis')).href)
+  const {LlmService}=await import(pathToFileURL(req.resolve('@deepseek-ai/dsh-llm')).href)
+  const root=scratch(),ctx=new Context(),service=ctx.plugin(LlmService)
+  const mounted=ctx.plugin(host,{cwd:root,usageFile:join(root,'ledger.json'),timeoutMs:45000})
+  await new Promise(r=>setTimeout(r,100))
+  try{
+    for(const provider of ['opencode','grok','codex']){
+      const models=await ctx.llm.listModels(provider)
+      assert(models.length>0)
+      const model=models[0].id,info=await ctx.llm.resolveModelInfo(provider,model)
+      assert(info.context.contextWindow>0)
+      const result=await drain(ctx.llm,turn(provider,model,'Reply exactly RUNTIME_OK. Do not use tools or inspect files.'))
+      const usage=result.chunks.find(chunk=>chunk.type==='usage')?.usage
+      if(provider==='codex'&&usage?.totalTokens)assert.equal(usage.totalTokens,usage.inputTokens+usage.outputTokens+(usage.cacheReadTokens??0)+(usage.cacheWriteTokens??0))
+      log({runtime:provider,models:models.length,selectedModel:model,contextWindow:info.context.contextWindow,error:result.error,text:textOf(result),usage,finish:result.chunks.at(-1)})
+    }
+    await mounted.dispose()
+    const after=await drain(ctx.llm,turn('codex','fixture'))
+    assert(after.error||after.chunks.at(-1)?.reason?.kind==='error')
+    log({runtimeDisposed:true,unregistered:true})
+  }finally{await mounted.dispose();await service.dispose()}
+}
+
+if(mode === 'hardening'){
+  await check('actual denied-read ACL is handled without throwing',()=>{
+    if(process.platform!=='win32')throw new Error('UNVERIFIED: this ACL probe requires Windows icacls')
+    const root=scratch(),dir=join(root,'workspace','session');fs.mkdirSync(dir,{recursive:true})
+    const file=join(dir,'usage.json');fs.writeFileSync(file,JSON.stringify({session:{inputTokens:1,totalTokens:1}}))
+    const identity=command('whoami.exe',['/user','/fo','csv','/nh'])
+    const sid=/S-1-[0-9-]+/.exec(identity.stdout)?.[0];assert(sid)
+    assert.equal(command('icacls.exe',[file,'/deny',`*${sid}:(R)`]).status,0)
+    try{
+      assert.throws(()=>fs.readFileSync(file),/EACCES|EPERM/)
+      assert.equal(host.readGrokCliUsage(root).available,false)
+      return{deniedReadConfirmed:true,readerSurvived:true}
+    }finally{assert.equal(command('icacls.exe',[file,'/remove:d',`*${sid}`]).status,0)}
+  })
+  await check('scheduled checks use the effective local source and stop on disposal',async()=>{
+    const root=scratch(),effects=[],hits=[],started=Date.now()
+    const server=createServer((_q,res)=>{hits.push(Date.now()-started);res.setHeader('content-type','application/json');res.end(JSON.stringify({version:'99.0.0'}))})
+    await new Promise(r=>server.listen(0,'127.0.0.1',r))
+    const source=`http://127.0.0.1:${server.address().port}/package.json`
+    try{
+      host.apply({logger:{info(){},warn(){}},llm:{registerAdapter(){return()=>{}}},inject(){},effect(fn){effects.push(fn())}},
+        {cwd:root,usageFile:join(root,'ledger.json'),autoUpdate:'check',updateIntervalMs:60000,updateSource:source,providers:{grok:false,codex:false,opencode:{bin:process.execPath}}})
+      const deadline=Date.now()+65000
+      while(hits.length<2&&Date.now()<deadline)await new Promise(r=>setTimeout(r,200))
+      assert.equal(hits.length,2,'both initial and repeating checks execute')
+      effects.forEach(dispose=>dispose?.())
+      const count=hits.length;await new Promise(r=>setTimeout(r,600))
+      assert.equal(hits.length,count)
+      return{source:'isolated loopback HTTP',observedAtMs:hits,disposed:true,installationChanged:false}
+    }finally{effects.forEach(dispose=>dispose?.());await new Promise(r=>server.close(r))}
+  })
+}
 
 if (mode === 'inventory') {
   for (const args of [['status','--short'],['branch','--show-current'],['log','-5','--oneline'],['remote','-v']]) command('git', args)
@@ -122,7 +183,7 @@ if (mode === 'probes') {
     await pending.done
     assert(pending.child.killed);assert.equal(adapter.signIn.pending.size,0)
     assert.equal(web.size,0)
-    return {webRoutesDisposed:4,activeLoginKilledOnDispose:true,hooks:'called against mock host; DSH integration unverified',adapterUnregister:'registerAdapter returns no disposer in current mount contract'}
+    return {webRoutesDisposed:4,activeLoginKilledOnDispose:true,hooks:'called against mock host in this probe',adapterUnregister:'this mock returns no disposer; real service disposal requires a separate runtime probe'}
   })
   await check('CLI list parser, broken shim, POSIX PATH lookup', async()=>{
     const root=scratch(),file=join(root,'models.mjs')
@@ -233,6 +294,13 @@ if(mode === 'source-scan'){
   }
 }
 
+if (mode === 'snapshot') {
+  const m=mount({timeoutMs:45000})
+  const payload=await host.describeRoutes(m.adapter,m.adapter.ledger,0,{force:true})
+  fs.writeFileSync(join(evidence,'real-payload.json'),JSON.stringify(payload,null,2))
+  fs.writeFileSync(join(evidence,'real-dashboard.html'),host.renderUsageHtml(payload,Date.now(),payload.routes,payload.limitsNotice,payload.cliUsage,payload.plans,{autoRefresh:false}))
+  log({snapshotWritten:true,routes:payload.routes.map(r=>r.id)})
+}
 if (mode === 'real') {
   const m=mount({timeoutMs:45000})
   const payload=await host.describeRoutes(m.adapter,m.adapter.ledger,0)
@@ -249,6 +317,40 @@ if (mode === 'real') {
     const result=await drain(m.adapter,turn(id,model,'Reply exactly AUDIT_OK. Do not use tools or inspect files.'))
     log({realTurn:id,model,error:result.error,chunks:result.chunks})
   }
+}
+
+if(mode === 'real-capabilities'){
+  const data=redPng(),ref={attachmentId:'audit-red',mediaType:'image/png',bytes:data.length,width:32,height:32}
+  const attachments={async readImage(){return{ref,data}}}
+  const m=mount({timeoutMs:45000},{attachments})
+  await m.adapter.loadOpencodeModelInfo()
+  log({catalogSource:'OpenCode api GET /api/model',models:Object.keys(m.adapter.opencodeModelInfo.byModel).length,
+    limits:['opencode/beam-free','opencode/deepseek-v4.1-flash-free','opencode/deepseek-v4.1-flash'].map(id=>({id,...m.adapter.limitsFor('opencode',id)}))})
+  log({grokModels:(await m.adapter.listModels('grok')).map(model=>model.id)})
+  for(const provider of ['codex','grok','opencode']){
+    const model=m.adapter.config.providers[provider].defaultModel
+    m.adapter.config.cwd=scratch()
+    const result=await drain(m.adapter,{provider,model,messages:[{role:'user',content:[{type:'text',text:'Name the dominant color of the supplied image in one word. Do not use tools.'},{type:'image',attachment:ref}]}]})
+    log({vision:provider,error:result.error,text:textOf(result),finish:result.chunks.at(-1),expectedColor:'red'})
+  }
+  for(const provider of ['codex','grok']){
+    const model=m.adapter.config.providers[provider].defaultModel
+    m.adapter.config.cwd=scratch()
+    const tools=[{name:'audit_echo',description:'Return the provided value',parameters:{type:'object',properties:{value:{type:'string'}},required:['value']}}]
+    const request=await drain(m.adapter,{...turn(provider,model,'Call the DSH audit_echo tool with value "bridge". Request the tool; do not simulate its result.'),tools})
+    const call=request.chunks.find(chunk=>chunk.type==='block-end'&&chunk.block.type==='tool-call')?.block
+    log({toolRequest:provider,error:request.error,call,finish:request.chunks.at(-1)})
+    if(call?.name==='audit_echo'){
+      const args=JSON.parse(call.arguments),value='REAL_HOST_RESULT_'+args.value
+      const reply=await drain(m.adapter,{provider,model,tools,messages:[{role:'assistant',content:[call]},{role:'user',source:{kind:'tool',callId:call.id},content:[{type:'tool-result',toolCallId:call.id,content:[{type:'text',text:value}]}]},{role:'user',content:[{type:'text',text:'Reply with the tool result exactly. Do not request another tool.'}]}]})
+      log({toolResult:provider,error:reply.error,text:textOf(reply),expected:value})
+    }
+  }
+  m.adapter.config.cwd=scratch()
+  m.adapter.config.providers.codex.sandbox='workspace-write'
+  const written=await drain(m.adapter,turn('codex',m.adapter.config.providers.codex.defaultModel,'Create audit-write.txt in the current working directory containing exactly CHECK_OK. Then reply AUDIT_WRITE_OK.'))
+  const file=join(m.adapter.config.cwd,'audit-write.txt')
+  log({workspaceWrite:'codex',error:written.error,text:textOf(written),fileExists:fs.existsSync(file),contents:fs.existsSync(file)?fs.readFileSync(file,'utf8'):null})
 }
 
 if(mode === 'real-sanity'){
@@ -291,6 +393,14 @@ if(mode === 'mutations'){
   for(const file of ['index.js','client.js','package.json','README.md','CHANGELOG.md','LICENSE','cordis.patch.yml'])fs.copyFileSync(join(repo,file),join(copy,file))
   fs.cpSync(join(repo,'test'),join(copy,'test'),{recursive:true})
   const cases=[
+    ['adapter','index.js','Math.max(0, mapped.inputTokens - mapped.cacheReadTokens)','mapped.inputTokens'],
+    ['model-limits','index.js','Math.min(cap, nativeContext)','nativeContext'],
+    ['execution','index.js','includeSystemPrompt: config.includeSystemPrompt !== false','includeSystemPrompt: config.includeSystemPrompt === true'],
+    ['execution','index.js','return session.header.cwd','return this.config.cwd'],
+    ['capabilities','index.js',"toolBridge: config.toolBridge === false ? false : 'json'","toolBridge: false"],
+    ['capabilities','index.js',"if (promptDir) { try { rmSync(promptDir, { recursive: true, force: true }) }", "if (false) { try { rmSync(promptDir, { recursive: true, force: true }) }"],
+    ['usage','index.js','if (force) this.invalidateCaches()','if (false) this.invalidateCaches()'],
+    ['usage','index.js','    rolloutCache.clear()','    /* retain parsed rollout cache */'],
     ['adapter','index.js',"name: this.config.providers[provider]?.displayName ?? provider","name: 'BROKEN'"],
     ['adapter','index.js',"if (id === 'codex' && typeof override?.readModels !== 'function') {","if (id === 'codex' && !Array.isArray(merged.models)) {"],
     ['adapter','index.js',"if (id === 'codex' && typeof override?.readModels !== 'function') {","if (id === 'codex' && typeof override?.readModels !== 'function' && !Array.isArray(merged.models)) {"],

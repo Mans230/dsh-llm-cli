@@ -8,8 +8,8 @@
  *
  * The CLI owns authentication and model access; this adapter only maps the
  * harness message/stream vocabulary onto one headless CLI turn. The CLI agent
- * runs with its own tools in `cwd`, so its reply is a finished answer rather
- * than raw tool-call deltas: the adapter declares a text-only stream.
+ * runs in the session workspace. Text streams incrementally; offered harness
+ * tools use a validated JSON relay, and attachments use CLI image transports.
  *
  * Every route is optional; a profile patch supplies `config.providers`.
  */
@@ -114,11 +114,16 @@ function defaultRoutes() {
       displayName: 'OpenCode (CLI)',
       bin: [appDataPath('npm', 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe'), 'opencode'],
       listArgs: ['models'],
+      modelInfoArgs: ['api', 'GET', '/api/model'],
+      contextWindowCap: 500000,
+      preserveFreeContext: true,
       defaultModel: 'opencode/deepseek-v4.1-flash-free',
       parseList: parseOpencodeList,
       parseLine: parseOpencodeLine,
-      buildArgs: (model, prompt, promptFile) =>
-        promptFile
+      buildArgs: (model, prompt, promptFile, execution = {}) =>
+        execution.images?.length
+          ? ['run', '--model', model, '--format', 'json', '--file', execution.images[0], promptFile ? `Read the full transcript at ${promptFile} and answer its last user turn.` : prompt]
+          : promptFile
           ? ['run', '--model', model, '--format', 'json', '--file', promptFile, 'The attached file is the full conversation transcript. Reply with your next message only, with no commentary about the file.']
           : ['run', '--model', model, '--format', 'json', prompt],
     },
@@ -129,8 +134,11 @@ function defaultRoutes() {
       defaultModel: 'grok-4.7',
       parseList: parseGrokList,
       parseLine: parseGrokLine,
-      buildArgs: (model, prompt, promptFile) =>
-        promptFile
+      imageTransport: 'acp',
+      buildArgs: (model, prompt, promptFile, execution = {}) =>
+        execution.images?.length
+          ? ['agent', '-m', model, 'stdio']
+          : promptFile
           ? ['--prompt-file', promptFile, '-m', model, '--output-format', 'streaming-json']
           : ['-p', prompt, '-m', model, '--output-format', 'streaming-json'],
     },
@@ -143,8 +151,8 @@ function defaultRoutes() {
       readModels: () => readCodexModelList(),
       defaultModel: 'gpt-6.1-sol',
       parseLine: parseCodexLine,
-      buildArgs: (model, prompt, promptFile) =>
-        promptFile
+      buildArgs: (model, prompt, promptFile, execution = {}) => {
+        const args = promptFile
           ? [
               'exec',
               '--json',
@@ -152,12 +160,15 @@ function defaultRoutes() {
               '--color',
               'never',
               '-s',
-              'read-only',
+              execution.sandbox ?? 'read-only',
               '-m',
               model,
               `The attached file is the full conversation transcript. Read it (${promptFile}) and reply with your next message only, with no commentary about the file.`,
             ]
-          : ['exec', '--json', '--skip-git-repo-check', '--color', 'never', '-s', 'read-only', '-m', model, prompt],
+          : ['exec', '--json', '--skip-git-repo-check', '--color', 'never', '-s', execution.sandbox ?? 'read-only', '-m', model, prompt]
+        args.splice(1, 0, ...(execution.images ?? []).flatMap((file) => ['--image', file]))
+        return args
+      },
     },
   }
 }
@@ -555,7 +566,7 @@ function parseRollout(file) {
   } catch {
     return null
   }
-  const value = { sessionId: '', model: '', endedAt: 0, sessionTotals: null, rate: null, contextWindow: undefined, days: [] }
+  const value = { sessionId: '', model: '', endedAt: 0, sessionTotals: null, rate: null, rateAt: 0, contextWindow: undefined, days: [] }
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim()
     if (trimmed.length === 0 || trimmed[0] !== '{') continue
@@ -583,7 +594,10 @@ function parseRollout(file) {
       if (perTurn && typeof perTurn === 'object') {
         value.days.push({ date: new Date(at || Date.now()).toISOString().slice(0, 10), usage: codexUsage(perTurn) })
       }
-      if (payload.rate_limits && typeof payload.rate_limits === 'object') value.rate = payload.rate_limits
+      if (payload.rate_limits && typeof payload.rate_limits === 'object') {
+        value.rate = payload.rate_limits
+        value.rateAt = at
+      }
     }
   }
   if (key) {
@@ -610,6 +624,8 @@ function readCodexCliUsage(dir) {
     }),
     dir: dir ?? '',
     limits: { primary: null, secondary: null },
+    limitsObservedAt: { primary: null, secondary: null },
+    limitsStale: { primary: true, secondary: true },
   }
   if (!dir || !existsSync(dir)) return { ...empty, note: 'codex sessions directory not found' }
   let files = []
@@ -626,6 +642,7 @@ function readCodexCliUsage(dir) {
   const sessions = []
   let bestLimitsAt = 0
   let limits = { primary: null, secondary: null }
+  const limitsObservedAt = { primary: null, secondary: null }
   let lastContextWindow
 
   for (const file of files) {
@@ -639,7 +656,18 @@ function readCodexCliUsage(dir) {
       byDay.set(day.date, row)
     }
     if (parsed.contextWindow !== undefined) lastContextWindow = parsed.contextWindow
-    const { sessionId, model, endedAt, sessionTotals, rate } = parsed
+    const { sessionId, model, endedAt, sessionTotals, rate, rateAt } = parsed
+    // Quota-only events are useful even before a session records token totals.
+    if (rate && rateAt >= bestLimitsAt) {
+      const primary = normalizeCodexLimit(rate.primary, rateAt)
+      const secondary = normalizeCodexLimit(rate.secondary, rateAt)
+      if (primary || secondary) {
+        bestLimitsAt = rateAt
+        limits = { primary: primary ?? limits.primary, secondary: secondary ?? limits.secondary }
+        if (primary) limitsObservedAt.primary = rateAt
+        if (secondary) limitsObservedAt.secondary = rateAt
+      }
+    }
     if (!sessionTotals) continue
     addUsage(totals, sessionTotals)
     totals.turns += 1
@@ -656,14 +684,6 @@ function readCodexCliUsage(dir) {
       ...sessionTotals,
       turns: 1,
     })
-    if (rate && endedAt >= bestLimitsAt) {
-      const primary = normalizeCodexLimit(rate.primary, endedAt)
-      const secondary = normalizeCodexLimit(rate.secondary, endedAt)
-      if (primary || secondary) {
-        bestLimitsAt = endedAt
-        limits = { primary: primary ?? limits.primary, secondary: secondary ?? limits.secondary }
-      }
-    }
   }
 
   sessions.sort((left, right) => right.endedAt - left.endedAt)
@@ -682,6 +702,11 @@ function readCodexCliUsage(dir) {
     models,
     daily,
     limits,
+    limitsObservedAt,
+    limitsStale: Object.fromEntries(['primary', 'secondary'].map((key) => [key,
+      !limitsObservedAt[key] || Date.now() - limitsObservedAt[key] > 5 * 60000 ||
+      (limits[key]?.resetsAt > 0 && limits[key].resetsAt <= Date.now()),
+    ])),
     contextWindow: lastContextWindow,
     note: sessions.length === 0 ? 'no codex turns recorded yet' : '',
     capabilities: { ...empty.capabilities, cost: false },
@@ -950,9 +975,7 @@ function buildPrompt(options, includeSystem) {
   const turns = []
   for (const message of options.messages ?? []) {
     const role = message?.role ?? 'user'
-    // The harness system/developer turns are tool-and-harness scaffolding for a
-    // tool-calling loop this route does not expose; forwarding them to the CLI
-    // agent only inflates the turn, so they are dropped by default.
+    // Forward harness instructions unless the profile explicitly opts out.
     if ((role === 'system' || role === 'developer') && !includeSystem) continue
     const text = contentToText(message?.content)
     if (text.length === 0) continue
@@ -984,10 +1007,13 @@ function contentToText(content) {
         if (typeof block.text === 'string' && block.text.length > 0) out.push(`[thinking] ${block.text}`)
         break
       case 'tool-call':
-        out.push(`[tool call ${block.name ?? ''}(${block.arguments ?? ''})]`)
+        out.push(`[tool call ${block.id ?? ''} ${block.name ?? ''}(${block.arguments ?? ''})]`)
+        break
+      case 'tool-result':
+        out.push(`[tool result ${block.toolCallId ?? ''}${block.isError ? ' (error)' : ''}]\n${contentToText(block.content)}`)
         break
       case 'image':
-        out.push('[image attachment]')
+        out.push('[image supplied separately with this request]')
         break
       case 'file':
         out.push('[file attachment]')
@@ -997,6 +1023,28 @@ function contentToText(content) {
     }
   }
   return out.join('\n').trim()
+}
+
+const TOOL_BRIDGE_PREFIX = 'DSH_TOOL_CALLS '
+
+function toolBridgePrompt(tools) {
+  return `\n\nDSH tools available for this turn (JSON schemas):\n${JSON.stringify(tools)}\n` +
+    `To request one or more of THESE tools, return ONLY ${TOOL_BRIDGE_PREFIX}` +
+    '[{"name":"exact tool name","arguments":{}}] with valid JSON double quotes. ' +
+    'The host executes the tools under its own permission rules and returns correlated tool results on the next turn. ' +
+    'Do not claim a tool was executed before its result arrives. For a normal answer, write normal text without this prefix.'
+}
+
+function bridgeCalls(text, tools) {
+  if (!text.startsWith(TOOL_BRIDGE_PREFIX)) return []
+  const calls = JSON.parse(text.slice(TOOL_BRIDGE_PREFIX.length))
+  if (!Array.isArray(calls) || calls.length === 0 || calls.length > 16) throw new Error('expected 1 to 16 tool requests')
+  const names = new Set(tools.map((tool) => tool.name))
+  return calls.map((call) => {
+    if (!names.has(call?.name)) throw new Error('the requested tool was not offered for this turn')
+    if (!call.arguments || typeof call.arguments !== 'object' || Array.isArray(call.arguments)) throw new Error('tool arguments must be a JSON object')
+    return { type: 'tool-call', id: randomUUID(), name: call.name, arguments: JSON.stringify(call.arguments) }
+  })
 }
 
 /** True when the line is a JSON object, so a log line is not read as one. */
@@ -1195,14 +1243,17 @@ function parseCodexLine(line) {
   }
   const usage = event?.usage ?? event?.info?.last_token_usage ?? event?.info?.total_token_usage
   if (usage && typeof usage === 'object') {
-    return { usage: codexUsage(usage) }
+    const mapped = codexUsage(usage)
+    // The harness requires disjoint input/cache counters. Keep rollout readers
+    // in Codex's native accounting; only the streaming boundary subtracts cache.
+    return { usage: { ...mapped, inputTokens: Math.max(0, mapped.inputTokens - mapped.cacheReadTokens) } }
   }
   return null
 }
 
 /**
- * Map Codex token counters onto the harness vocabulary. Codex reports cached
- * input separately from fresh input, and reasoning as a subset of output.
+ * Preserve Codex's native counters: cached input is inside input_tokens and
+ * reasoning is a subset of output. The stream boundary adapts disjoint input.
  */
 function codexUsage(usage) {
   const inputTokens = toCount(usage.input_tokens)
@@ -1418,12 +1469,34 @@ class CliAdapter {
     return { id: provider, name: this.config.providers[provider]?.displayName ?? provider }
   }
 
+  async loadOpencodeModelInfo() {
+    const route = this.config.providers.opencode
+    if (!route || route.modelInfoArgs === false) return
+    if (this.opencodeModelInfo && Date.now() - this.opencodeModelInfo.at < LIST_TTL_MS) return
+    const byModel = {}
+    try {
+      const { code, stdout } = await runCapture(route, route.modelInfoArgs, { cwd: this.config.cwd, timeoutMs: 30000 })
+      if (code === 0) {
+        const payload = JSON.parse(stdout)
+        for (const entry of (Array.isArray(payload) ? payload : payload.data ?? [])) {
+          if (typeof entry.id !== 'string' || typeof entry.providerID !== 'string') continue
+          byModel[`${entry.providerID}/${entry.id}`] = {
+            contextWindow: firstNumber(entry.limit?.context),
+            maxOutputTokens: firstNumber(entry.limit?.output),
+            name: entry.name,
+          }
+        }
+      }
+    } catch { /* Older CLIs without the catalog API retain the labelled fallback. */ }
+    this.opencodeModelInfo = { at: Date.now(), byModel }
+  }
+
   /** The CLI route keeps the harness default retry policy. */
   providerRetryPolicy() {
     return undefined
   }
 
-  /** The CLI route streams text only, so it prices no images. */
+  /** The CLIs expose no separate image-price estimate to the harness. */
   imageRequestPricing() {
     return undefined
   }
@@ -1466,6 +1539,7 @@ class CliAdapter {
   async listModels(provider) {
     const route = this.config.providers[provider]
     if (!route) return []
+    if (provider === 'opencode') await this.loadOpencodeModelInfo()
     const configured = modelEntries(route.models)
     if (configured.length > 0) {
       return configured.map((entry) => ({ provider, id: entry.id, name: entry.name ?? entry.id }))
@@ -1509,6 +1583,22 @@ class CliAdapter {
     const configuredContext = configured?.contextWindow
     const configuredMax = configured?.maxOutputTokens
     const maxField = configuredMax === undefined ? {} : { maxOutputTokens: configuredMax }
+    if (provider === 'opencode') {
+      const native = this.opencodeModelInfo?.byModel?.[model]
+      const nativeContext = native?.contextWindow > 0 ? native.contextWindow : undefined
+      const cap = route?.contextWindowCap > 0 ? route.contextWindowCap : undefined
+      const preserveFree = route?.preserveFreeContext !== false && /(?:^|[-/])free$/.test(model) && nativeContext >= 1000000
+      const contextWindow = configuredContext ?? route?.contextWindow ??
+        (nativeContext ? (cap && !preserveFree ? Math.min(cap, nativeContext) : nativeContext) : DEFAULT_CONTEXT_WINDOW)
+      return {
+        contextWindow,
+        maxOutputTokens: configuredMax ?? (native?.maxOutputTokens > 0 ? native.maxOutputTokens : undefined),
+        source: configuredContext !== undefined ? 'configured for this model'
+          : route?.contextWindow ? 'configured for this route'
+            : nativeContext ? `opencode model catalog${contextWindow < nativeContext ? ' (configured context cap)' : ''}`
+              : 'harness default: OpenCode model catalog unavailable',
+      }
+    }
     if (provider === 'codex') {
       const now = Date.now()
       if (!this.codexLimitsCache || now - this.codexLimitsCache.at > LIMITS_TTL_MS) {
@@ -1578,6 +1668,7 @@ class CliAdapter {
     }
     const usage = new Map(this.ledger?.summary().providers.map((row) => [row.key, row]) ?? [])
     const entries = []
+    await this.loadOpencodeModelInfo()
     for (const [id, route] of Object.entries(this.config.providers)) {
       let signedIn = null
       if (this.signIn) {
@@ -1626,7 +1717,18 @@ class CliAdapter {
    * trailing window (7 by convention on the dashboard); 0 means lifetime.
    * Results are cached per window because they touch disk or spawn a process.
    */
-  async cliUsage(days = 0) {
+  invalidateCaches() {
+    rolloutCache.clear()
+    this.cliUsageCache.clear()
+    this.routeFactsCache = undefined
+    this.codexLimitsCache = undefined
+    this.limitsCache = undefined
+    this.listCache.clear()
+    this.opencodeModelInfo = undefined
+  }
+
+  async cliUsage(days = 0, { force = false } = {}) {
+    if (force) this.invalidateCaches()
     const windowDays = Number.isFinite(days) && days > 0 ? days : 0
     const now = Date.now()
     const cached = this.cliUsageCache.get(windowDays)
@@ -1691,16 +1793,27 @@ class CliAdapter {
   }
 
   async resolveModel(provider, model) {
+    if (provider === 'opencode') await this.loadOpencodeModelInfo()
     const route = this.config.providers[provider]
     const limits = this.limitsFor(provider, model)
     return {
       provider,
       id: model,
-      name: model,
+      name: modelEntries(route?.models).find((entry) => entry.id === model)?.name ?? model,
       context: {
         contextWindow: limits.contextWindow ?? route?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
       },
     }
+  }
+
+  async resolveTurnCwd(options) {
+    if (typeof this.config.resolveCwd === 'function') return this.config.resolveCwd(options)
+    if (options.sessionId) {
+      const session = (this.sessions ?? this.ctx.sessions)?.get(options.sessionId)
+      if (!session?.header?.cwd) throw new Error('llm-cli: the session workspace is unavailable; no global-directory fallback was used')
+      return session.header.cwd
+    }
+    return this.config.providers[options.provider]?.cwd ?? this.config.cwd
   }
 
   async *stream(options) {
@@ -1713,17 +1826,27 @@ class CliAdapter {
       yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'the request was aborted', code: 'ABORTED' } } }
       return
     }
+    let cwd
+    try { cwd = await this.resolveTurnCwd(options) } catch (error) {
+      this.recordFailure(provider, options.model, turnStartedAt, error.message)
+      throw error
+    }
+    if (options.signal?.aborted) {
+      this.recordFailure(provider, options.model, turnStartedAt, 'the request was aborted')
+      yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'the request was aborted', code: 'ABORTED' } } }
+      return
+    }
 
     // A missing cwd makes spawn fail with an ENOENT that names the binary, so
     // the turn looks like a missing CLI instead of a bad config path.
     let cwdIsDirectory = false
     try {
-      cwdIsDirectory = statSync(this.config.cwd).isDirectory()
+      cwdIsDirectory = typeof cwd === 'string' && isAbsolute(cwd) && statSync(cwd).isDirectory()
     } catch {
       cwdIsDirectory = false
     }
     if (!cwdIsDirectory) {
-      const message = `llm-cli: the configured cwd is not a directory: ${this.config.cwd}`
+      const message = `llm-cli: the configured cwd is not a directory: ${cwd}`
       this.recordFailure(provider, options.model, turnStartedAt, message)
       throw new Error(message)
     }
@@ -1734,22 +1857,49 @@ class CliAdapter {
       throw new Error(launchError)
     }
 
-    const prompt = buildPrompt(options, this.config.includeSystemPrompt === true)
+    const offeredTools = this.config.toolBridge === 'json' && Array.isArray(options.tools) ? options.tools : []
+    const bridgeEnabled = offeredTools.length > 0
     let promptFile
     let promptDir
-    if (prompt.length > ARG_PROMPT_LIMIT || route.promptMode === 'file') {
-      promptDir = mkdtempSync(join(tmpdir(), 'dsh-llm-cli-'))
-      promptFile = join(promptDir, 'prompt.txt')
-      writeFileSync(promptFile, prompt, 'utf8')
+    let child
+    let acpPrompt
+    const removePromptDir = () => { if (promptDir) { try { rmSync(promptDir, { recursive: true, force: true }) } catch { /* best effort */ } } }
+    try {
+      const prompt = buildPrompt(options, this.config.includeSystemPrompt === true) + (bridgeEnabled ? toolBridgePrompt(offeredTools) : '')
+      const blocks = (options.messages ?? []).flatMap((message) => Array.isArray(message.content) ? message.content.filter((block) => block?.type === 'image') : [])
+      if (blocks.length > 8 || (provider === 'opencode' && blocks.length > 1)) throw new Error('llm-cli: this route supports at most ' + (provider === 'opencode' ? 'one image' : '8 images') + ' per request')
+      const images = []
+      const imageContent = []
+      for (const block of blocks) {
+        const store = this.attachments ?? this.ctx.attachments
+        if (!store?.readImage || !block.attachment) throw new Error('llm-cli: image bytes require the DSH attachment service; the image was not replaced by text')
+        const stored = await store.readImage(block.attachment)
+        const extension = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' }[stored?.ref?.mediaType]
+        if (!extension || !(stored.data instanceof Uint8Array) || stored.data.length > 20 * 1024 * 1024) throw new Error('llm-cli: unsupported or oversized image attachment')
+        promptDir ??= mkdtempSync(join(tmpdir(), 'dsh-llm-cli-'))
+        const file = join(promptDir, `image-${images.length}.${extension}`)
+        writeFileSync(file, stored.data, { mode: 0o600 })
+        images.push(file)
+        imageContent.push({ type: 'image', data: Buffer.from(stored.data).toString('base64'), mimeType: stored.ref.mediaType })
+      }
+      if (prompt.length > ARG_PROMPT_LIMIT || route.promptMode === 'file') {
+        promptDir ??= mkdtempSync(join(tmpdir(), 'dsh-llm-cli-'))
+        promptFile = join(promptDir, 'prompt.txt')
+        writeFileSync(promptFile, prompt, { mode: 0o600 })
+      }
+      options.signal?.throwIfAborted()
+      if (provider === 'grok' && images.length && route.imageTransport === 'acp') acpPrompt = [{ type: 'text', text: prompt }, ...imageContent]
+      const args = route.buildArgs(options.model, prompt, promptFile, { cwd, sandbox: route.sandbox, images })
+      child = spawnCommand(route, args, {
+        cwd, windowsHide: true, env: process.env,
+        stdio: [acpPrompt ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+      })
+      child.stdin?.on('error', () => {})
+    } catch (error) {
+      removePromptDir()
+      this.recordFailure(provider, options.model, turnStartedAt, error.message)
+      throw error
     }
-    const args = route.buildArgs(options.model, prompt, promptFile)
-
-    const child = spawnCommand(route, args, {
-      cwd: this.config.cwd,
-      windowsHide: true,
-      env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
 
     let stderr = ''
     child.stderr?.setEncoding('utf8')
@@ -1774,13 +1924,7 @@ class CliAdapter {
       clearTimeout(timer)
       options.signal?.removeEventListener('abort', onAbort)
       if (child.exitCode === null) child.kill()
-      if (promptDir) {
-        try {
-          rmSync(promptDir, { recursive: true, force: true })
-        } catch {
-          /* best effort */
-        }
-      }
+      removePromptDir()
     }
 
     let started = false
@@ -1795,6 +1939,8 @@ class CliAdapter {
     let reasoningText = ''
     let cliError = ''
     let stdout = ''
+    let acpCompleted = false
+    let acpStopReason
 
     try {
       const closed = new Promise((resolve) => {
@@ -1803,10 +1949,32 @@ class CliAdapter {
       })
 
       const reader = createInterface({ input: child.stdout, crlfDelay: Infinity })
+      const send = (packet) => child.stdin?.write(JSON.stringify(packet) + '\n')
+      if (acpPrompt) send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'dsh-llm-cli', version: currentVersion() } } })
       for await (const line of reader) {
         const trimmed = line.trim()
         if (trimmed.length === 0) continue
         stdout += `${line}\n`
+        if (acpPrompt) {
+          let packet
+          try { packet = JSON.parse(trimmed) } catch { /* parser below handles non-JSON */ }
+          if (packet?.error) { cliError = packet.error.message ?? 'Grok ACP request failed'; child.kill() }
+          else if (packet?.id === 1 && packet.result) send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd, mcpServers: [] } })
+          else if (packet?.id === 2 && packet.result) {
+            if (!packet.result.sessionId) { cliError = 'Grok ACP returned no session id'; child.kill() }
+            else send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: packet.result.sessionId, prompt: acpPrompt } })
+          } else if (packet?.id === 3 && packet.result) {
+            acpStopReason = packet.result.stopReason
+            if (acpStopReason === 'cancelled') cliError = 'Grok ACP turn was cancelled'
+            else acpCompleted = true
+            child.kill()
+          }
+          else if (packet?.method && packet.id !== undefined) {
+            send(packet.method === 'session/request_permission'
+              ? { jsonrpc: '2.0', id: packet.id, result: { outcome: { outcome: 'cancelled' } } }
+              : { jsonrpc: '2.0', id: packet.id, error: { code: -32601, message: 'Client method not supported' } })
+          }
+        }
         const parsed = route.parseLine ? route.parseLine(trimmed) : null
         if (parsed?.error) cliError = String(parsed.error).slice(0, 400)
         if (parsed?.usage) {
@@ -1828,18 +1996,22 @@ class CliAdapter {
           yield { type: 'reasoning-delta', index: reasoningIndex, text: parsed.reasoning }
         }
         if (parsed?.text) {
+          text += parsed.text
+          if (bridgeEnabled && (TOOL_BRIDGE_PREFIX.startsWith(text) || text.startsWith(TOOL_BRIDGE_PREFIX))) continue
+          const delta = started ? parsed.text : text
           if (textIndex < 0) {
             textIndex = nextIndex
             nextIndex += 1
             started = true
             yield { type: 'block-start', index: textIndex, blockType: 'text' }
           }
-          text += parsed.text
-          yield { type: 'text-delta', index: textIndex, text: parsed.text }
+          yield { type: 'text-delta', index: textIndex, text: delta }
         }
       }
 
       const exit = await closed
+      if (acpCompleted && !cliError) exit.code = 0
+      if (acpPrompt && !acpCompleted && !cliError && !aborted && !timedOut) cliError = 'Grok ACP exited before completing the prompt'
 
       if (aborted) {
         this.recordFailure(provider, options.model, turnStartedAt, 'the request was aborted')
@@ -1881,15 +2053,27 @@ class CliAdapter {
         throw new Error(message)
       }
 
-      if (!started) {
-        textIndex = nextIndex
-        nextIndex += 1
-        started = true
-        yield { type: 'block-start', index: textIndex, blockType: 'text' }
-        yield { type: 'text-delta', index: textIndex, text }
+      let calls = []
+      try { if (bridgeEnabled) calls = bridgeCalls(text, offeredTools) } catch (error) {
+        const message = `llm-cli: invalid DSH tool request: ${error.message}`
+        this.recordFailure(provider, options.model, turnStartedAt, message)
+        throw new Error(message)
       }
-
-      yield { type: 'block-end', index: textIndex, block: { type: 'text', text } }
+      if (calls.length) {
+        for (const call of calls) {
+          const index = nextIndex++
+          yield { type: 'block-start', index, blockType: 'tool-call' }
+          yield { type: 'tool-call-delta', index, id: call.id, name: call.name, argumentsDelta: call.arguments }
+          yield { type: 'block-end', index, block: call }
+        }
+      } else {
+        if (!started) {
+          textIndex = nextIndex++
+          yield { type: 'block-start', index: textIndex, blockType: 'text' }
+          yield { type: 'text-delta', index: textIndex, text }
+        }
+        yield { type: 'block-end', index: textIndex, block: { type: 'text', text } }
+      }
       if (reasoningIndex >= 0) {
         yield { type: 'block-end', index: reasoningIndex, block: { type: 'reasoning', text: reasoningText } }
       }
@@ -1905,7 +2089,7 @@ class CliAdapter {
         costUsd: cost,
         ok: true,
       })
-      yield { type: 'finish', reason: { kind: 'stop' } }
+      yield { type: 'finish', reason: { kind: calls.length ? 'tool-calls' : acpStopReason === 'max_tokens' ? 'max-tokens' : 'stop' } }
     } finally {
       finishCleanup()
     }
@@ -2734,6 +2918,10 @@ function windowDaysFromUrl(url) {
   }
 }
 
+function forceUsageFromUrl(url) {
+  try { return new URL(url ?? '', 'http://localhost').searchParams.get('force') === '1' } catch { return false }
+}
+
 /** A short human label for a trailing window measured in (possibly fractional) days. */
 function windowLabelFor(days) {
   if (!(days > 0)) return 'lifetime'
@@ -2745,7 +2933,8 @@ function windowLabelFor(days) {
  * The dashboard payload: recorded usage plus, per route, the identity, the
  * sign-in state and the per-model limits the CLI itself publishes.
  */
-async function describeRoutes(adapter, ledger, days = 0) {
+async function describeRoutes(adapter, ledger, days = 0, { force = false } = {}) {
+  if (force) adapter.invalidateCaches()
   const summary = ledger.summary()
   const routes = await adapter.routeFacts()
   let cliUsage = { grok: null, opencode: null, plans: {}, windowDays: 0 }
@@ -2925,13 +3114,13 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans, 
     )
   }
   const codexLimits = codexCli?.limits ?? {}
-  for (const [title, minutes, limit] of [
-    ['Codex 5-hour limit', codexLimits.primary?.windowMinutes ?? 300, codexLimits.primary],
-    ['Codex weekly limit', codexLimits.secondary?.windowMinutes ?? 10080, codexLimits.secondary],
+  for (const [title, minutes, limit, key] of [
+    ['Codex 5-hour limit', codexLimits.primary?.windowMinutes ?? 300, codexLimits.primary, 'primary'],
+    ['Codex weekly limit', codexLimits.secondary?.windowMinutes ?? 10080, codexLimits.secondary, 'secondary'],
   ]) {
     if (limit) {
       planCards.push(
-        `<div class="card"><div class="k">${title} (reported by the CLI)</div><div class="v">${(limit.usedPercent ?? 0).toFixed(0)}% used</div>${gaugeHtml((limit.usedPercent ?? 0) / 100, `${minutes >= 1440 ? `${Math.round(minutes / 1440)}d` : `${Math.round(minutes / 60)}h`} window · resets ${stamp(limit.resetsAt)}`)}</div>`,
+        `<div class="card"><div class="k">${title} (reported by the CLI)</div><div class="v">${(limit.usedPercent ?? 0).toFixed(0)}% recorded</div>${gaugeHtml((limit.usedPercent ?? 0) / 100, `${minutes >= 1440 ? `${Math.round(minutes / 1440)}d` : `${Math.round(minutes / 60)}h`} window · resets ${stamp(limit.resetsAt)}`)}<div class="k">Recorded snapshot: ${escapeHtml(stamp(codexCli?.limitsObservedAt?.[key]))}${codexCli?.limitsStale?.[key] ? ' (stale)' : ''}. Refresh rereads CLI files; it does not fetch a live quota.</div></div>`,
       )
     }
   }
@@ -3292,6 +3481,9 @@ function normalizeConfig(raw) {
     if (id === 'codex' && typeof override?.readModels !== 'function') {
       merged.readModels = () => readCodexModelList(merged.modelsCacheFile ?? codexModelsCache)
     }
+    if (id === 'codex' && merged.sandbox !== undefined && !['read-only', 'workspace-write'].includes(merged.sandbox)) {
+      throw new Error('llm-cli: providers.codex.sandbox must be read-only or workspace-write')
+    }
     providers[id] = merged
   }
   return {
@@ -3301,7 +3493,9 @@ function normalizeConfig(raw) {
       typeof config.usageFile === 'string' && config.usageFile.length > 0
         ? config.usageFile
         : profilePath('.dsh', 'llm-cli-usage.json'),
-    includeSystemPrompt: config.includeSystemPrompt === true,
+    includeSystemPrompt: config.includeSystemPrompt !== false,
+    resolveCwd: typeof config.resolveCwd === 'function' ? config.resolveCwd : undefined,
+    toolBridge: config.toolBridge === false ? false : 'json',
     plan: config.plan && typeof config.plan === 'object' ? config.plan : {},
     grokUsageDir:
       typeof config.grokUsageDir === 'string' && config.grokUsageDir.length > 0
@@ -3390,7 +3584,18 @@ export function apply(ctx, config) {
     })
   }
   const adapter = new CliAdapter(ctx, normalized, manager, ledger)
-  ctx.llm.registerAdapter(routeNames, adapter)
+  const unregister = ctx.llm.registerAdapter(routeNames, adapter)
+  if (typeof unregister === 'function') ctx.effect?.(() => unregister)
+  ctx.inject(['sessions'], (child) => {
+    const sessions = child.sessions
+    adapter.sessions = sessions
+    child.effect?.(() => () => { if (adapter.sessions === sessions) adapter.sessions = undefined })
+  })
+  ctx.inject(['attachments'], (child) => {
+    const attachments = child.attachments
+    adapter.attachments = attachments
+    child.effect?.(() => () => { if (adapter.attachments === attachments) adapter.attachments = undefined })
+  })
 
   // `tools` is optional: the route still works where the harness exposes no
   // tool surface, only the sign-in tools are unavailable there.
@@ -3428,7 +3633,7 @@ export function apply(ctx, config) {
               url = new URL('http://localhost/llm-cli/usage')
             }
             if (url.searchParams.has('check')) await updates.check({ force: true })
-            const payload = await describeRoutes(adapter, ledger, windowDaysFromUrl(request?.url))
+            const payload = await describeRoutes(adapter, ledger, windowDaysFromUrl(request?.url), { force: forceUsageFromUrl(request?.url) })
             // Another machine may read the numbers with a token, but the update
             // action token stays on this host.
             const updateView = updates.status()
@@ -3454,7 +3659,7 @@ export function apply(ctx, config) {
         path: '/llm-cli/usage.json',
         handler: guard(async (request, response) => {
           try {
-            const payload = await describeRoutes(adapter, ledger, windowDaysFromUrl(request?.url))
+            const payload = await describeRoutes(adapter, ledger, windowDaysFromUrl(request?.url), { force: forceUsageFromUrl(request?.url) })
             response.writeHead(200, {
               'content-type': 'application/json; charset=utf-8',
               'cache-control': 'no-store',

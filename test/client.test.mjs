@@ -109,6 +109,11 @@ function makeReact(overrides = {}) {
       ]
     },
     useEffect: () => {},
+    useRef: (initial) => {
+      const key = slot++
+      if (!cells.has(key)) cells.set(key, { current: initial })
+      return cells.get(key)
+    },
   }
   return { React, cells, reset: () => { slot = 0 } }
 }
@@ -170,6 +175,10 @@ const walk = (node, found = []) => {
 const buttonNamed = (node, label) => walk(node).find((element) => element.type === 'button' && element.children.includes(label))
 
 const html = pageOf(first)
+assert(html.includes('Recorded snapshot:')&&html.includes('(stale)'),'recorded quotas expose their age and stale status')
+assert(html.includes('does not fetch a live quota'),'refresh does not promise a live account query')
+buttonNamed(tree(first),'Refresh').props.onClick()
+assertEqual(first.cells.get(5).current,true,'manual refresh requests a forced source reread')
 first.reset()
 const summaryHtml = render(first.exportsObj.LlmCliPage({ view: 'summary' }))
 assert(summaryHtml.startsWith('<span') && !/<svg|<table/.test(summaryHtml), 'summary is one line without charts or tables')

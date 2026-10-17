@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply } from '../index.js'
 
-export function mount(config = {}) {
+export function mount(config = {}, services = {}) {
   const root = mkdtempSync(join(tmpdir(), 'dsh-llm-cli-test-'))
   const usageFile = join(root, 'ledger.json')
   let adapter
@@ -17,6 +17,7 @@ export function mount(config = {}) {
   const logs = []
   apply(
     {
+      ...services,
       logger: { info(message) { logs.push(message) }, warn(message) { logs.push(message) } },
       llm: { registerAdapter: (names, value) => { routes = names; adapter = value } },
       inject: (_deps, cb) =>

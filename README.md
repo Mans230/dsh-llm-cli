@@ -14,10 +14,19 @@ reads what those CLIs record about themselves.
 | `grok` | Grok Build CLI | `grok -p <prompt> -m <m> --output-format streaming-json` |
 | `codex` | OpenAI Codex CLI | `codex exec --json -m <m> <prompt>` |
 
-Each CLI owns its own authentication and its own agent loop, so the adapter
-declares a **text-only** stream: a turn on these routes is a finished answer from
-that CLI. The CLI cannot call harness tools and cannot see harness files; it runs
-in `config.cwd`.
+Each CLI owns its authentication and agent loop. Text deltas are forwarded as
+the CLI emits them. Turns use the DSH session workspace and forward its system
+instructions by default. Offered harness tools can be requested through a JSON
+relay; the harness executes them under its own permission rules and returns
+correlated results on the next turn. This relay depends on the model following
+the protocol; it is not native MCP forwarding.
+
+Image attachments are resolved through the DSH attachment service and delivered
+as actual bytes: Codex uses `--image`, OpenCode uses `--file`, and Grok uses ACP
+image blocks over stdin. Vision still requires a capable model. OpenCode accepts
+one image per request; Codex/Grok accept up to eight, at most 20 MiB each. PNG,
+JPEG, WebP and GIF are accepted. Temporary attachment files are removed after
+the turn. Missing attachment services produce an explicit error.
 
 ## Requirements
 
@@ -89,7 +98,10 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
       grok: {}
 ```
 
-- `cwd` — where the CLI agent runs a turn.
+- `cwd` — fallback workspace for calls without a session id. Session turns use
+  `ctx.sessions.get(sessionId).header.cwd`; a missing session workspace fails
+  explicitly. `providers.<id>.cwd` overrides the fallback for that route.
+  Programmatic mounts may supply `resolveCwd(options)` instead.
 - `usageFile` — the usage ledger (JSON). Counts only: never prompt or reply text.
   Writes take a lock and merge with what is on disk, so two profiles can share
   one file without losing each other's turns.
@@ -98,9 +110,14 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
   `defaultModel`, `displayName`, `contextWindow` to override.
 - `providers.<id>.models` entries are either a bare model id or an object that
   also states that model's limits: `{ id, name?, contextWindow?,
-  maxOutputTokens? }`. The object form is for routes whose CLI publishes ids but
-  no limits — OpenCode is the one shipped today, so every OpenCode model would
-  otherwise report the harness default of 200,000 tokens. A configured entry
+  maxOutputTokens? }`. OpenCode reads native limits with
+  `opencode api GET /api/model`. `providers.opencode.contextWindowCap` defaults
+  to 500,000; smaller published limits stay smaller. With
+  `preserveFreeContext: true` (default), `*-free` models advertising at least
+  one million tokens retain their native context. Published output limits stay
+  unchanged. If the catalog is unavailable, the 200,000-token harness fallback
+  is explicitly labeled. Set `modelInfoArgs: false` to disable catalog lookup.
+  A configured entry
   wins over the route's `contextWindow` and over anything a CLI cache reports:
 
   ```yaml
@@ -129,7 +146,12 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
   (pin `providers.codex.models` to override).
 - `opencodeStats.args` — override the `opencode stats` arguments the dashboard
   runs (default `stats --json --all --models --cost`).
-- `includeSystemPrompt` — also forward the harness system prompt to the CLI.
+- `includeSystemPrompt` — forward system/developer instructions (default `true`);
+  set `false` to opt out.
+- `providers.codex.sandbox` — `read-only` (default) or `workspace-write`.
+  The latter requests workspace editing; the CLI's own host policy can still
+  refuse it. The plugin does not bypass that policy.
+- `toolBridge` — JSON harness-tool relay by default; `false` disables it.
 - `dashboardToken` — required for a dashboard request from another machine.
   Loopback needs no token. A token shorter than 16 characters does not count as
   configured, so a stray `token=1` cannot unlock remote reads.
@@ -163,8 +185,8 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
 
   Each shows every route and model with the limits its CLI publishes, plus
   charts: daily tokens per CLI, an activity heatmap and token mix, cost by model,
-  per-model usage tables, the real Codex 5-hour and weekly subscription-limit
-  gauges, and — when `plan` budgets or `plan.grok.weeklyPremium` are configured —
+  per-model usage tables, recorded Codex 5-hour and weekly subscription-limit
+  snapshots with observation times and stale markers, and — when `plan` budgets or `plan.grok.weeklyPremium` are configured —
   used-vs-budget gauges. It also carries a **Check for updates** button and, when
   a newer version exists, **Update now**.
 - `GET /llm-cli/update.json` and `POST /llm-cli/update` for the same two actions
@@ -174,6 +196,12 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
   --ff-only` in the checkout for a git install. **A restart of the profile is
   what loads the new code**, so the update reports `restartRequired` rather than
   pretending the running process changed.
+
+The browser Refresh button and `?force=1` on either usage endpoint invalidate
+the plugin's caches and reread the original CLI sources. Codex quota snapshots
+remain the last values its CLI recorded, including quota-only events. Refresh
+does not query a live account quota; values older than five minutes or past
+their reset time are marked stale, even if subsequent chat activity is recent.
 
 ## Usage data sources
 
@@ -255,19 +283,33 @@ builds synthetic Codex rollouts for the usage reader.
 | `test/dashboard.test.mjs` | dashboard authorization (loopback, token, cookie), the page refresh, and the recent-turn cells |
 | `test/update.test.mjs` | version compare, install detection, a real local git pull, a stub npm |
 | `test/contract.test.mjs` | the manifest and both halves' public exports |
+| `test/model-limits.test.mjs` | native OpenCode limits, context caps and configured precedence |
+| `test/execution.test.mjs` | session workspaces, sandbox arguments, instructions and incremental streaming |
+| `test/capabilities.test.mjs` | harness tool relay, image bytes/cleanup and Grok ACP |
 
 Every test mount passes its own scratch ledger path; most use
 `test/_harness.mjs`. A test run therefore never writes into the ledger of a
 profile that is running the plugin.
 
 `node test/_audit.mjs probes`, `suites` and `mutations` run the extended audit
-checks. `real` reads host usage and runs one real turn per CLI; `real-sanity`
+checks. `snapshot` reads host usage without running inference. `real-capabilities`
+executes real vision/tool turns and a Codex workspace-write probe in scratch
+directories. `real` reads host usage and runs one real turn per CLI; `real-sanity`
 cross-checks the source files and runs a raw Codex turn; `clone` downloads and
 tests `origin/main`. Those modes intentionally use host data or the network.
 Logs are written under the system temporary directory in
-`dsh-llm-cli-audit-20261017` (override with `AUDIT_DIR`). Run `real` before
+`dsh-llm-cli-audit-20261017` (override with `AUDIT_DIR`). Run `snapshot` or `real` before
 `probes` to provide its dashboard snapshot. All audit mounts isolate their ledger
 and assert the live ledger remains absent. They refuse to run if it exists.
+
+`hardening` tests a real denied-read Windows ACL and scheduled checks against a
+loopback source. `runtime` loads the published Cordis/DSH LLM services from an
+isolated install selected by `DSH_RUNTIME_DIR` and executes all three routes.
+`node test/_descendants.mjs` probes child cleanup on the current OS.
+`node test/_browser.mjs` creates an optional real React DOM browser fixture in
+`AUDIT_DIR`, downloading pinned React UMD scripts into that temporary HTML;
+its HTTP responses are fixtures. These optional probes do not add dependencies
+to the plugin or run during `npm test`.
 
 CI runs the syntax check and the suite on Node 20, 22 and 24
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).

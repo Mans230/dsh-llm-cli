@@ -3,11 +3,12 @@
  * 5-hour/weekly rate limits) and the trailing-window projection.
  * All fixtures are synthetic; no CLI is involved.
  */
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { readCodexCliUsage, readCodexModelList, windowCliUsage } from '../index.js'
 import { assert, assertEqual } from './_assert.mjs'
+import { mount } from './_harness.mjs'
 
 const root = join(tmpdir(), `dsh-llm-cli-usage-${process.pid}`)
 rmSync(root, { recursive: true, force: true })
@@ -146,6 +147,21 @@ assertEqual(readCodexCliUsage(cacheRoot).totalTokens, 105, 'the first scan reads
 assertEqual(readCodexCliUsage(cacheRoot).totalTokens, 105, 'a repeat scan agrees with the first')
 writeCached(900000)
 assertEqual(readCodexCliUsage(cacheRoot).totalTokens, 900005, 'a rewritten rollout is re-read instead of served stale')
+const mounted = mount({codexUsageDir:cacheRoot,providers:{opencode:false,grok:false,codex:{bin:process.execPath,models:['gpt-5']}}})
+assertEqual((await mounted.adapter.cliUsage()).codex.totalTokens,900005,'the adapter reads the original rollout')
+writeCached(200)
+assertEqual((await mounted.adapter.cliUsage()).codex.totalTokens,900005,'the ordinary request reuses its bounded cache')
+assertEqual((await mounted.adapter.cliUsage(0,{force:true})).codex.totalTokens,205,'explicit refresh rereads the changed rollout immediately')
+mounted.adapter.cliUsageCache.get(0).at=0
+// Change file size too: this fixture tests the adapter TTL, not filesystem
+// timestamp resolution for two same-size writes within one clock tick.
+writeCached(300000)
+assertEqual((await mounted.adapter.cliUsage()).codex.totalTokens,300005,'the ordinary cache also refreshes when its TTL expires')
+const fixedStamp=new Date('2026-10-17T12:00:00Z')
+writeCached(400000);utimesSync(cacheFile,fixedStamp,fixedStamp)
+await mounted.adapter.cliUsage(0,{force:true})
+writeCached(500000);utimesSync(cacheFile,fixedStamp,fixedStamp)
+assertEqual((await mounted.adapter.cliUsage(0,{force:true})).codex.totalTokens,500005,'force refresh bypasses the rollout cache even with unchanged size and mtime')
 
 // A missing directory is reported, never thrown.
 const missing = readCodexCliUsage(join(root, 'nope'))
@@ -156,6 +172,28 @@ assert(missing.note.length > 0, 'a missing directory explains itself')
 assertEqual(readCodexModelList(join(root, 'nope.json')), [], 'a missing catalog is empty')
 writeFileSync(join(root, 'junk.json'), '{not json', 'utf8')
 assertEqual(readCodexModelList(join(root, 'junk.json')), [], 'an unreadable catalog is empty')
+
+// Quotas are snapshots, not live readings; later chat activity must not re-date them.
+const snapshotDir = join(root, 'snapshots')
+mkdirSync(snapshotDir, { recursive: true })
+const observedAt = now - 10 * 86400000
+writeFileSync(join(snapshotDir, 'rollout-snapshot.jsonl'), [
+  line({ timestamp: new Date(observedAt).toISOString(), type: 'event_msg', payload: {
+    type: 'token_count', info: { total_token_usage: { input_tokens: 5, output_tokens: 1 } },
+    rate_limits: { primary: { used_percent: 30, window_minutes: 300, resets_in_seconds: 60 } },
+  } }),
+  line({ timestamp: new Date(now).toISOString(), type: 'event_msg', payload: { type: 'agent_message', message: 'recent chat' } }),
+].join('\n'))
+const snapshot = readCodexCliUsage(snapshotDir)
+assertEqual(snapshot.limitsObservedAt.primary, observedAt, 'quota age follows its token event, not later session activity')
+assertEqual(snapshot.limitsStale.primary, true, 'an old or expired quota is marked stale')
+const noRecent = windowCliUsage(snapshot, now + 1, 'codex', 7)
+assertEqual(noRecent.limits.primary.usedPercent, 30, 'a usage window preserves the last recorded account quota')
+assertEqual(noRecent.limitsObservedAt.primary, observedAt, 'windowing preserves the quota observation time')
+writeFileSync(join(snapshotDir, 'rollout-quota-only.jsonl'), line({timestamp:new Date(now).toISOString(),type:'event_msg',payload:{type:'token_count',rate_limits:{primary:{used_percent:42,window_minutes:300,resets_in_seconds:3600}}}}))
+const quotaOnly=readCodexCliUsage(snapshotDir)
+assertEqual(quotaOnly.limits.primary.usedPercent,42,'a fresh quota-only rollout supersedes old usage snapshots')
+assertEqual(quotaOnly.limitsObservedAt.primary,now,'quota-only events retain their actual observation time')
 
 rmSync(root, { recursive: true, force: true })
 console.log('ok  usage.test')

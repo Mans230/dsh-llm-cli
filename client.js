@@ -423,6 +423,7 @@ window.__ModuleLoader__.load({
       // Updates are checked when asked, not on every page open, so opening the
       // dashboard does not make a network call on someone else's behalf.
       const [update, setUpdate] = React.useState({ status: 'idle' })
+      const forceNext = React.useRef(false)
 
       const checkForUpdates = () => {
         setUpdate({ status: 'checking' })
@@ -459,7 +460,9 @@ window.__ModuleLoader__.load({
         let live = true
         setState((current) => (current.status === 'ready' ? { ...current, refreshing: true } : { status: 'loading' }))
         const query = days > 0 ? `?days=${days}` : '?days=all'
-        fetch(`/llm-cli/usage.json${query}`, { headers: { accept: 'application/json' } })
+        const force = forceNext.current
+        forceNext.current = false
+        fetch(`/llm-cli/usage.json${query}${force ? '&force=1' : ''}`, { headers: { accept: 'application/json' } })
           .then((response) => {
             if (!response.ok) throw new Error(`HTTP ${response.status}`)
             return response.json()
@@ -487,7 +490,7 @@ window.__ModuleLoader__.load({
         return h(
           'span',
           null,
-          'Model routes served by the OpenCode, Grok and Codex CLIs installed on this host, with the model limits each CLI publishes, the real Codex 5-hour and weekly subscription limits, charts of the usage recorded by the CLIs and by this harness, and optional usage-plan budgets.',
+          'Model routes served by the OpenCode, Grok and Codex CLIs installed on this host, with published model limits, recorded Codex quota snapshots, usage charts, and optional usage-plan budgets.',
         )
       }
 
@@ -566,8 +569,8 @@ window.__ModuleLoader__.load({
       )
       const codexLimits = codex?.limits ?? {}
       const codexLimitCards = [
-        codexLimits.primary ? { title: 'Codex 5-hour limit', minutes: codexLimits.primary.windowMinutes ?? 300, limit: codexLimits.primary } : null,
-        codexLimits.secondary ? { title: 'Codex weekly limit', minutes: codexLimits.secondary.windowMinutes ?? 10080, limit: codexLimits.secondary } : null,
+        codexLimits.primary ? { title: 'Codex 5-hour limit', minutes: codexLimits.primary.windowMinutes ?? 300, limit: codexLimits.primary, key: 'primary' } : null,
+        codexLimits.secondary ? { title: 'Codex weekly limit', minutes: codexLimits.secondary.windowMinutes ?? 10080, limit: codexLimits.secondary, key: 'secondary' } : null,
       ].filter(Boolean)
       const toolbar = h(
         'span',
@@ -598,7 +601,7 @@ window.__ModuleLoader__.load({
         h('label', { style: { ...S.k, display: 'inline-flex', gap: '5px', alignItems: 'center', cursor: 'pointer' } },
           h('input', { type: 'checkbox', checked: auto, onChange: (event) => setAuto(event.target.checked) }),
           'auto 30s'),
-        h('button', { type: 'button', style: S.button, onClick: () => setTick((value) => value + 1) }, state.refreshing ? 'Refreshing\u2026' : 'Refresh'),
+        h('button', { type: 'button', style: S.button, onClick: () => { forceNext.current = true; setTick((value) => value + 1) } }, state.refreshing ? 'Refreshing\u2026' : 'Refresh'),
         h('span', { style: S.k }, `updated ${when(data.generatedAt)}`),
       )
 
@@ -608,7 +611,7 @@ window.__ModuleLoader__.load({
         h(
           'p',
           { style: S.lead },
-          'Three model routes, each served by a CLI that owns its own authentication and runs in its own workspace. A turn on these routes is a finished answer from that CLI: it cannot call harness tools, and it cannot see harness files.',
+          'Three model routes served by installed CLIs using their own authentication. Turns use the session workspace, forward harness instructions, and can request harness tools. Image support depends on the selected CLI and model.',
         ),
         h('div', { style: S.toolbarRow }, h('div', { style: S.heading }, `CLI-recorded usage \u00b7 ${windowLabel} (the CLIs\u2019 own accounting)`), toolbar),
         coarseScopes.length > 0
@@ -649,17 +652,18 @@ window.__ModuleLoader__.load({
           ? h(
               'div',
               { style: S.cards },
-              codexLimitCards.map(({ title, minutes, limit }) =>
+              codexLimitCards.map(({ title, minutes, limit, key }) =>
                 h(
                   'div',
                   { key: title, style: S.card },
                   h('div', { style: S.k }, title),
-                  h('div', { style: S.v }, `${(limit.usedPercent ?? 0).toFixed(0)}% used`),
+                  h('div', { style: S.v }, `${(limit.usedPercent ?? 0).toFixed(0)}% recorded`),
                   h(Gauge, {
                     percent: (limit.usedPercent ?? 0) / 100,
                     label: `${(limit.usedPercent ?? 0).toFixed(0)}% used`,
                     detail: `${minutes >= 1440 ? `${Math.round(minutes / 1440)}d` : `${Math.round(minutes / 60)}h`} window \u00b7 resets ${when(limit.resetsAt)}`,
                   }),
+                  h('div', { style: S.note }, `Recorded snapshot: ${when(codex?.limitsObservedAt?.[key])}${codex?.limitsStale?.[key] ? ' (stale)' : ''}. Refresh rereads CLI files; it does not fetch a live quota.`),
                 ),
               ),
             )

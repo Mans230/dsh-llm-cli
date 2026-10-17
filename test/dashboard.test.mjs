@@ -24,6 +24,9 @@ const html = webRoutes.find((route) => route.path === '/llm-cli/usage')
 assert(!logs.some((line) => line.includes(usageFile) || line.includes(process.cwd()) || line.includes(TOKEN)), 'mount logs contain no deployment path or dashboard token')
 const json = webRoutes.find((route) => route.path === '/llm-cli/usage.json')
 assert(html && json, 'both dashboard routes are registered')
+const originalInvalidate=adapter.invalidateCaches.bind(adapter)
+let invalidations=0
+adapter.invalidateCaches=()=>{invalidations++;originalInvalidate()}
 
 function fakeResponse() {
   return {
@@ -59,6 +62,11 @@ const local = await call(html, fakeRequest('/llm-cli/usage'))
 assertEqual(local.status, 200, 'a loopback request is served')
 assertMatch(local.headers['content-type'], /text\/html/, 'the page is html')
 assert(local.body.includes('CLI provider usage'), 'the page renders')
+await call(json,fakeRequest('/llm-cli/usage.json?force=1'))
+assert(invalidations>0,'the JSON force query invalidates source caches')
+const beforeHtml=invalidations
+await call(html,fakeRequest('/llm-cli/usage?force=1'))
+assert(invalidations>beforeHtml,'the HTML force query invalidates source caches')
 
 const localV6 = await call(json, fakeRequest('/llm-cli/usage.json', { address: '::1' }))
 assertEqual(localV6.status, 200, 'an IPv6 loopback request is served')
