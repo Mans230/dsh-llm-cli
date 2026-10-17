@@ -119,6 +119,34 @@ assertEqual(windowed.totalSessions, 2, 'the unwindowed count is preserved')
 assertEqual(windowed.models.map((model) => model.id), ['gpt-5'], 'windowed models are recomputed')
 assertEqual(windowed.totalTokens, 5500, 'windowed totals are recomputed')
 
+// A scan caches each rollout by size and mtime, so a dashboard refresh does not
+// re-parse the whole history, and a rewritten rollout is not served stale.
+const cacheRoot = join(root, 'cache-sessions')
+const cacheDay = join(cacheRoot, '2026', '10', '18')
+mkdirSync(cacheDay, { recursive: true })
+const cacheFile = join(cacheDay, 'rollout-cache.jsonl')
+const writeCached = (input) =>
+  writeFileSync(
+    cacheFile,
+    [
+      line({ timestamp: iso(60000), type: 'session_meta', payload: { id: 'cache', model: 'gpt-5' } }),
+      line({
+        timestamp: iso(60000),
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: { total_token_usage: { input_tokens: input, output_tokens: 5, total_tokens: input + 5 } },
+        },
+      }),
+    ].join('\n') + '\n',
+    'utf8',
+  )
+writeCached(100)
+assertEqual(readCodexCliUsage(cacheRoot).totalTokens, 105, 'the first scan reads the rollout')
+assertEqual(readCodexCliUsage(cacheRoot).totalTokens, 105, 'a repeat scan agrees with the first')
+writeCached(900000)
+assertEqual(readCodexCliUsage(cacheRoot).totalTokens, 900005, 'a rewritten rollout is re-read instead of served stale')
+
 // A missing directory is reported, never thrown.
 const missing = readCodexCliUsage(join(root, 'nope'))
 assertEqual(missing.available, false, 'a missing directory is unavailable')

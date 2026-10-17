@@ -174,7 +174,12 @@ builds synthetic Codex rollouts for the usage reader.
 | `test/signin.test.mjs` | device-code parsing, `SignInManager`, the auto sign-in error |
 | `test/usage.test.mjs` | Codex rollout reading (tokens, models, days, 5h/weekly limits) and windowing |
 | `test/client.test.mjs` | the browser half rendered against a real payload |
+| `test/failures.test.mjs` | CLI error events, timeouts, plain-text answers, a bad `cwd`, block indices |
 | `test/contract.test.mjs` | the manifest and both halves' public exports |
+
+Every suite mounts through `test/_harness.mjs`, which gives it a scratch
+directory and its own ledger path. A test run therefore never writes into the
+ledger of a profile that is running the plugin.
 
 CI runs the syntax check and the suite on Node 20, 22 and 24
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).

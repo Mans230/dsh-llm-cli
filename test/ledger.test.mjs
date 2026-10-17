@@ -7,7 +7,7 @@ import { rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { apply } from '../index.js'
+import { UsageLedger, apply } from '../index.js'
 import { assert, assertEqual } from './_assert.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -65,6 +65,27 @@ const summary = adapter.ledger.summary()
 assertEqual(summary.turns, 2, 'the ledger records both turns')
 assertEqual(summary.recent.filter((entry) => entry.ok).length, 1, 'one successful turn')
 assertEqual(summary.recent.filter((entry) => !entry.ok).length, 1, 'one failed turn')
+
+// Retention caps the stored turns, never the lifetime totals. Deriving the
+// totals from the capped list made every figure plateau at 1000 turns.
+const retentionFile = join(tmpdir(), `dsh-llm-cli-ledger-retention-${process.pid}.json`)
+rmSync(retentionFile, { force: true })
+const retention = new UsageLedger(retentionFile, 50)
+for (let index = 0; index < 200; index += 1) {
+  retention.record({ at: index, ms: 10, provider: 'codex', model: 'gpt', inputTokens: 10, outputTokens: 1, costUsd: 0.01, ok: true })
+}
+const kept = retention.summary()
+assertEqual(kept.turns, 200, 'turns are counted over the whole life of the ledger')
+assertEqual(kept.providers[0].turns, 200, 'per-provider turns are lifetime totals')
+assertEqual(kept.providers[0].inputTokens, 2000, 'per-provider tokens are lifetime totals')
+assertEqual(Number(kept.providers[0].costUsd.toFixed(2)), 2, 'lifetime cost is not capped by retention')
+assertEqual(kept.recent.length, 50, 'the recent list stays bounded by retention')
+
+const reloaded = new UsageLedger(retentionFile, 50).summary()
+assertEqual(reloaded.turns, 200, 'lifetime turns survive a restart')
+assertEqual(Number(reloaded.providers[0].costUsd.toFixed(2)), 2, 'lifetime cost survives a restart')
+assertEqual(reloaded.recent.length, 50, 'retention still caps the stored turns')
+rmSync(retentionFile, { force: true })
 
 rmSync(ledger, { force: true })
 assert(true, 'ledger test')
