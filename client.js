@@ -372,13 +372,30 @@ window.__ModuleLoader__.load({
     // ------------------------------------------------------------------ views
     function TokenMix({ usage, label }) {
       if (!usage) return null
-      const segments = [
-        { label: 'Input', value: usage.inputTokens, color: COLOR.input },
-        { label: 'Output', value: usage.outputTokens, color: COLOR.output },
-        { label: 'Cache read', value: usage.cacheReadTokens, color: COLOR.cache },
-        { label: 'Reasoning', value: usage.reasoningTokens, color: COLOR.reasoning },
-      ]
-      return h(Panel, { title: `${label} token mix` }, h(Donut, { segments }))
+      // The host sends slices that already add up to the view's total, because
+      // the CLIs disagree about whether cache reads sit inside input. Reasoning
+      // is never a slice, so it is named under the chart instead.
+      const byKey = { input: COLOR.input, output: COLOR.output, cache: COLOR.cache }
+      const slices = Array.isArray(usage.mix?.slices)
+        ? usage.mix.slices
+        : [
+            { key: 'input', label: 'Input', value: usage.inputTokens },
+            { key: 'output', label: 'Output', value: usage.outputTokens },
+            { key: 'cache', label: 'Cache read', value: usage.cacheReadTokens },
+          ]
+      const segments = slices.map((slice) => ({
+        label: slice.label,
+        value: slice.value,
+        color: byKey[slice.key] ?? COLOR.cache,
+      }))
+      return h(
+        Panel,
+        { title: `${label} token mix` },
+        h(Donut, { segments }),
+        usage.reasoningTokens > 0
+          ? h('p', { style: S.note }, `${counts(usage.reasoningTokens)} reasoning tokens are reported separately and are not part of the total above.`)
+          : null,
+      )
     }
 
     function CliModelsTable({ grok, opencode, codex }) {
@@ -511,6 +528,11 @@ window.__ModuleLoader__.load({
           reasoningTokens: day?.reasoningTokens,
         },
       }))
+      // A CLI that counts whole days serves a sub-day window at its smallest
+      // scope, so say so instead of letting the label overstate the precision.
+      const coarseScopes = [['opencode', opencode]].filter(
+        ([, view]) => view?.available && view.scopeDays > 0 && view.scopeDays > windowDays,
+      )
       const codexLimits = codex?.limits ?? {}
       const codexLimitCards = [
         codexLimits.primary ? { title: 'Codex 5-hour limit', minutes: codexLimits.primary.windowMinutes ?? 300, limit: codexLimits.primary } : null,
@@ -558,6 +580,13 @@ window.__ModuleLoader__.load({
           'Three model routes, each served by a CLI that owns its own authentication and runs in its own workspace. A turn on these routes is a finished answer from that CLI: it cannot call harness tools, and it cannot see harness files.',
         ),
         h('div', { style: S.toolbarRow }, h('div', { style: S.heading }, `CLI-recorded usage \u00b7 ${windowLabel} (the CLIs\u2019 own accounting)`), toolbar),
+        coarseScopes.length > 0
+          ? h(
+              'p',
+              { style: S.note },
+              `${coarseScopes.map(([id, view]) => `${id} covers ${view.scopeDays}d`).join(', ')} because that CLI counts whole days, so this window is shown at its smallest scope.`,
+            )
+          : null,
 
         // CLI-recorded totals
         h(

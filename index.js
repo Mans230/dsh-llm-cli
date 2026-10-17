@@ -15,9 +15,23 @@
  */
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, delimiter, dirname, isAbsolute, join } from 'node:path'
 
 export const name = 'llm-cli'
 export const inject = ['llm']
@@ -215,7 +229,28 @@ function blankCliUsage(source, capabilities) {
     daily: [],
     recentSessions: [],
     note: '',
+    mix: tokenMix({}, { cacheInInput: false }),
     capabilities: capabilities ?? { cost: false, rateLimits: false, perStep: false },
+  }
+}
+
+/**
+ * Split a view's counters into slices that add up to its total. The CLIs
+ * disagree about where cache reads live: OpenCode counts them beside input,
+ * Grok and Codex count them inside it. Reasoning is reported separately by all
+ * three and is never a slice, so the parts always sum to the whole.
+ */
+function tokenMix(usage, { cacheInInput }) {
+  const cache = toCount(usage?.cacheReadTokens)
+  const input = Math.max(0, toCount(usage?.inputTokens) - (cacheInInput ? cache : 0))
+  const output = toCount(usage?.outputTokens)
+  return {
+    total: input + output + cache,
+    slices: [
+      { key: 'input', label: 'Input', value: input },
+      { key: 'output', label: 'Output', value: output },
+      { key: 'cache', label: 'Cache read', value: cache },
+    ],
   }
 }
 
@@ -232,18 +267,23 @@ function finiteOr(value, fallback) {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
 
-/** Turn a Grok `usage.json` session block into the accumulator shape. */
+/**
+ * Turn a Grok `usage.json` session block into the accumulator shape. The file
+ * counts cached input inside `inputTokens`, and a per-model block has no total
+ * of its own, so the total is derived from the counters.
+ */
 function grokSessionUsage(block) {
-  return {
+  const usage = {
     inputTokens: toCount(block.inputTokens),
     outputTokens: toCount(block.outputTokens),
     cacheReadTokens: toCount(block.cachedReadTokens),
     cacheWriteTokens: toCount(block.cacheCreationTokens),
     reasoningTokens: toCount(block.reasoningTokens),
-    totalTokens: toCount(block.totalTokens),
     modelCalls: toCount(block.modelCalls),
     costUsd: finiteOr(block.costUsdTicks, 0) / TICKS_PER_USD,
   }
+  usage.totalTokens = tokenMix(usage, { cacheInInput: true }).total
+  return usage
 }
 
 /**
@@ -334,10 +374,14 @@ function readGrokCliUsage(dir) {
   const models = [...byModel.values()].sort((left, right) => right.totalTokens - left.totalTokens)
   const daily = [...byDay.values()].sort((left, right) => (left.date < right.date ? -1 : 1))
   const available = sessionCount > 0
+  // The session file counts cached input inside inputTokens.
+  const mix = tokenMix(totals, { cacheInInput: true })
   return {
     ...empty,
     available,
     ...totals,
+    totalTokens: mix.total,
+    mix,
     sessions,
     sessionCount,
     models,
@@ -384,10 +428,15 @@ function windowCliUsage(full, sinceMs, what = 'cli', windowDays = 0) {
   }
   const daily = (full.daily ?? []).filter((day) => day.date >= cutoffDate)
   const models = [...byModel.values()].sort((left, right) => right.totalTokens - left.totalTokens)
+  // Both windowed views embed cache reads in input, and a window must not keep
+  // the unwindowed mix from `full`.
+  const mix = tokenMix(totals, { cacheInInput: true })
   return {
     ...full,
     available: sessions.length > 0,
     ...totals,
+    totalTokens: mix.total,
+    mix,
     sessions,
     sessionCount: sessions.length,
     totalSessions: full.sessionCount ?? 0,
@@ -609,10 +658,14 @@ function readCodexCliUsage(dir) {
   sessions.sort((left, right) => right.endedAt - left.endedAt)
   const models = [...byModel.values()].sort((left, right) => right.totalTokens - left.totalTokens)
   const daily = [...byDay.values()].sort((left, right) => (left.date < right.date ? -1 : 1))
+  // Codex counts cached input inside input_tokens.
+  const mix = tokenMix(totals, { cacheInInput: true })
   return {
     ...empty,
     available: sessions.length > 0,
     ...totals,
+    totalTokens: mix.total,
+    mix,
     sessions,
     sessionCount: sessions.length,
     models,
@@ -626,7 +679,7 @@ function readCodexCliUsage(dir) {
 }
 
 /** Map `opencode stats --json` output onto the dashboard vocabulary. */
-function toOpencodeCliUsage(stats, args) {
+function toOpencodeCliUsage(stats, args, scopeDays) {
   const tokens = stats?.tokens ?? {}
   const models = (Array.isArray(stats?.models) ? stats.models : []).map((entry) => {
     const variant = entry?.model?.variant
@@ -650,10 +703,21 @@ function toOpencodeCliUsage(stats, args) {
     }
   })
   const tools = stats?.tools ?? null
+  const mix = tokenMix(
+    {
+      inputTokens: toCount(tokens.input),
+      outputTokens: toCount(tokens.output),
+      cacheReadTokens: toCount(tokens.cache?.read),
+    },
+    { cacheInInput: false },
+  )
   return {
     available: true,
     source: `opencode ${args.join(' ')}`,
     args,
+    // `opencode stats --days` takes whole days, so a sub-day window is served
+    // at the smallest scope it can offer. The caller reports the difference.
+    scopeDays: scopeDays ?? 0,
     from: finiteOr(stats?.range?.from, 0),
     to: finiteOr(stats?.range?.to, 0),
     sessions: toCount(stats?.sessions),
@@ -665,7 +729,8 @@ function toOpencodeCliUsage(stats, args) {
     cacheReadTokens: toCount(tokens.cache?.read),
     cacheWriteTokens: toCount(tokens.cache?.write),
     reasoningTokens: toCount(tokens.reasoning),
-    totalTokens: toCount(tokens.input) + toCount(tokens.output) + toCount(tokens.cache?.read),
+    totalTokens: mix.total,
+    mix,
     costUsd: finiteOr(stats?.cost, 0),
     activeDays: toCount(stats?.activeDays),
     streak: toCount(stats?.streak),
@@ -702,14 +767,14 @@ function statsArgsForDays(base, days) {
   return out
 }
 
-async function readOpencodeCliUsage(route, cwd, timeoutMs, argsOverride) {
+async function readOpencodeCliUsage(route, cwd, timeoutMs, argsOverride, scopeDays) {
   const args = argsOverride ?? route.statsArgs ?? ['stats', '--json', '--all', '--models', '--cost']
-  const { code, stdout, stderr } = await runCapture(route.bin, args, { cwd, timeoutMs })
+  const { code, stdout, stderr } = await runCapture(route, args, { cwd, timeoutMs })
   const text = stdout.trim()
   if (text.length === 0) {
     throw new Error(`${(stderr || '').trim().slice(0, 300) || `opencode ${args.join(' ')} exited ${code}`}`)
   }
-  return toOpencodeCliUsage(JSON.parse(text), args)
+  return toOpencodeCliUsage(JSON.parse(text), args, scopeDays)
 }
 
 /**
@@ -820,14 +885,13 @@ async function computePlans(planConfig, cliUsage, adapter, now) {
       const route = adapter?.config?.providers?.opencode
       if (route) {
         try {
-          const period = await readOpencodeCliUsage(route, adapter.config.cwd, 30000, [
-            'stats',
-            '--json',
-            '--days',
-            String(days),
-            '--models',
-            '--cost',
-          ])
+          const period = await readOpencodeCliUsage(
+            route,
+            adapter.config.cwd,
+            30000,
+            ['stats', '--json', '--days', String(days), '--models', '--cost'],
+            days,
+          )
           usedTokens = period.totalTokens
           usedUsd = period.costUsd
           scoped = true
@@ -1150,12 +1214,29 @@ function firstNumber(...values) {
   return undefined
 }
 
+/**
+ * A route carries the executable and any arguments that must come before the
+ * real ones. A Windows shim resolved to a node script needs `node <script>`
+ * ahead of the CLI arguments.
+ */
+function spawnCommand(route, args, options) {
+  const bin = typeof route === 'string' ? route : route?.bin
+  const prefix = typeof route === 'string' ? [] : route?.binArgs ?? []
+  return spawn(bin, [...prefix, ...args], options)
+}
+
+/** The message to show when a route's executable cannot be launched at all. */
+function launchErrorFor(route) {
+  if (!route?.launchError) return null
+  return `llm-cli: ${route.launchError}`
+}
+
 /** Spawn one CLI process and collect its stdout/stderr to completion. */
-function runCapture(bin, args, { cwd, timeoutMs }) {
+function runCapture(route, args, { cwd, timeoutMs }) {
   return new Promise((resolve, reject) => {
     let child
     try {
-      child = spawn(bin, args, { cwd, windowsHide: true, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] })
+      child = spawnCommand(route, args, { cwd, windowsHide: true, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] })
     } catch (error) {
       reject(error)
       return
@@ -1182,7 +1263,56 @@ function runCapture(bin, args, { cwd, timeoutMs }) {
   })
 }
 
-/** The first candidate path that exists on disk, else the bare command name. */
+/**
+ * Find a bare command on PATH the way a shell would, including the `.cmd` shims
+ * npm installs. Node's own spawn lookup only finds executables, so without this
+ * a globally installed CLI that ships nothing but a shim is invisible.
+ */
+function findOnPath(name) {
+  if (process.platform !== 'win32') return null
+  const dirs = (process.env.PATH ?? '').split(delimiter).filter(Boolean)
+  const extensions = (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
+  for (const dir of dirs) {
+    for (const extension of extensions) {
+      const candidate = join(dir, `${name}${extension.toLowerCase()}`)
+      try {
+        if (existsSync(candidate)) return candidate
+      } catch {
+        /* unreadable PATH entry */
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * Node cannot spawn a `.cmd` or `.bat` without a shell, and a shell would put
+ * the prompt on a command line where `&` and `|` mean something. The shim is a
+ * text file that names its real target, so read it and launch that instead.
+ * Returns null when the shim cannot be read, and the caller then explains
+ * itself rather than falling back to a shell.
+ */
+function resolveWindowsShim(bin) {
+  if (process.platform !== 'win32' || !/\.(cmd|bat)$/i.test(bin)) return { bin, prefix: [] }
+  let text
+  try {
+    text = readFileSync(bin, 'utf8')
+  } catch {
+    return null
+  }
+  const match = /"([^"]+\.(?:exe|js|mjs|cjs))"/i.exec(text)
+  if (!match) return null
+  const relative = match[1].replace(/%~dp0\\?/gi, '').replace(/%dp0%\\?/gi, '')
+  const target = isAbsolute(relative) ? relative : join(dirname(bin), relative)
+  try {
+    if (!existsSync(target)) return null
+  } catch {
+    return null
+  }
+  return /\.exe$/i.test(target) ? { bin: target, prefix: [] } : { bin: process.execPath, prefix: [target] }
+}
+
+/** The first candidate that exists on disk, else the bare command name. */
 function resolveBin(candidates) {
   const list = (Array.isArray(candidates) ? candidates : [candidates]).filter(Boolean)
   for (const candidate of list) {
@@ -1194,7 +1324,7 @@ function resolveBin(candidates) {
       }
       continue
     }
-    return candidate
+    return findOnPath(candidate) ?? candidate
   }
   return list.pop()
 }
@@ -1293,7 +1423,7 @@ class CliAdapter {
       }
     } else {
       try {
-        const { stdout } = await runCapture(route.bin, route.listArgs ?? [], {
+        const { stdout } = await runCapture(route, route.listArgs ?? [], {
           cwd: this.config.cwd,
           timeoutMs: 30000,
         })
@@ -1462,7 +1592,13 @@ class CliAdapter {
     }
     if (this.config.providers.opencode) {
       try {
-        value.opencode = await readOpencodeCliUsage(this.config.providers.opencode, this.config.cwd, 30000, daysArg)
+        value.opencode = await readOpencodeCliUsage(
+          this.config.providers.opencode,
+          this.config.cwd,
+          30000,
+          daysArg,
+          windowDays > 0 ? Math.max(1, Math.ceil(windowDays)) : 0,
+        )
       } catch (error) {
         value.opencode = {
           ...blankCliUsage('opencode stats', { cost: true, rateLimits: false, perStep: true }),
@@ -1515,8 +1651,13 @@ class CliAdapter {
       throw new Error(message)
     }
 
+    const launchError = launchErrorFor(route)
+    if (launchError) {
+      this.recordFailure(provider, options.model, turnStartedAt, launchError)
+      throw new Error(launchError)
+    }
+
     const prompt = buildPrompt(options, this.config.includeSystemPrompt === true)
-    const bin = route.bin
     let promptFile
     let promptDir
     if (prompt.length > ARG_PROMPT_LIMIT || route.promptMode === 'file') {
@@ -1526,7 +1667,7 @@ class CliAdapter {
     }
     const args = route.buildArgs(options.model, prompt, promptFile)
 
-    const child = spawn(bin, args, {
+    const child = spawnCommand(route, args, {
       cwd: this.config.cwd,
       windowsHide: true,
       env: process.env,
@@ -1745,7 +1886,7 @@ class SignInManager {
   /** Ask the CLI itself whether it is already signed in. */
   async status(provider) {
     const { route, signedIn, statusArgs } = this.routeFor(provider)
-    const { stdout, stderr } = await runCapture(route.bin, statusArgs, {
+    const { stdout, stderr } = await runCapture(route, statusArgs, {
       cwd: this.config.cwd,
       timeoutMs: 30000,
     }).catch(() => ({ stdout: '', stderr: '' }))
@@ -1762,7 +1903,7 @@ class SignInManager {
     const existing = this.pending.get(provider)
     if (existing) return { url: existing.url, code: existing.code, resumed: true }
     const { route, loginArgs, note } = this.routeFor(provider)
-    const child = spawn(route.bin, loginArgs, {
+    const child = spawnCommand(route, loginArgs, {
       cwd: this.config.cwd,
       windowsHide: true,
       env: process.env,
@@ -1893,6 +2034,66 @@ function readTotals(candidate) {
   return { turns: candidate.turns, providers, models }
 }
 
+/** How long a writer waits for the lock before leaving its turn pending. */
+const LOCK_WAIT_MS = 250
+/** A lock older than this belonged to a process that died holding it. */
+const LOCK_STALE_MS = 10000
+
+/** Block this thread briefly. Only used to wait out another writer. */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/** Take an exclusive lock file; returns a release function, or null on timeout. */
+function acquireLedgerLock(file) {
+  const lockFile = `${file}.lock`
+  const deadline = Date.now() + LOCK_WAIT_MS
+  for (;;) {
+    try {
+      closeSync(openSync(lockFile, 'wx'))
+      return () => {
+        try {
+          unlinkSync(lockFile)
+        } catch {
+          /* already released */
+        }
+      }
+    } catch (error) {
+      if (error?.code !== 'EEXIST') return null
+      try {
+        if (Date.now() - statSync(lockFile).mtimeMs > LOCK_STALE_MS) {
+          unlinkSync(lockFile)
+          continue
+        }
+      } catch {
+        /* raced with the holder, try again */
+      }
+      if (Date.now() >= deadline) return null
+      sleepSync(10)
+    }
+  }
+}
+
+/** Read the ledger file, or null when it is missing or unusable. */
+function readLedgerFile(file) {
+  let parsed
+  try {
+    parsed = JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    return null
+  }
+  const entries = Array.isArray(parsed?.entries) ? parsed.entries : []
+  const totals = readTotals(parsed?.totals) ?? totalsFrom(entries)
+  return { entries, totals }
+}
+
+/** Replace the ledger in one step, so a reader never sees half a write. */
+function writeLedgerFile(file, payload) {
+  const temporary = `${file}.${process.pid}.tmp`
+  writeFileSync(temporary, JSON.stringify(payload), 'utf8')
+  renameSync(temporary, file)
+}
+
 /**
  * Per-route usage ledger: one record per finished CLI turn, persisted so the
  * dashboard survives a harness restart. Records carry counts and cost only,
@@ -1904,6 +2105,7 @@ class UsageLedger {
     this.limit = limit ?? 1000
     this.entries = []
     this.totals = emptyTotals()
+    this.pending = []
     this.load()
   }
 
@@ -1924,15 +2126,48 @@ class UsageLedger {
   }
 
   record(entry) {
-    this.entries.push(entry)
+    const stored = entry?.id ? entry : { ...entry, id: randomUUID() }
+    this.entries.push(stored)
     if (this.entries.length > this.limit) this.entries = this.entries.slice(-this.limit)
-    addToTotals(this.totals, entry)
-    if (!this.file) return
+    addToTotals(this.totals, stored)
+    this.pending.push(stored)
+    // A write that never succeeds must not grow this list without bound.
+    if (this.pending.length > this.limit) this.pending = this.pending.slice(-this.limit)
+    this.flush()
+  }
+
+  /**
+   * Merge this process's turns into the file under a lock. Two profiles can
+   * point at one usageFile, so the write never replaces the file with this
+   * process's view alone. A write that cannot take the lock leaves its turn
+   * pending and retries on the next one.
+   */
+  flush() {
+    if (!this.file || this.pending.length === 0) return
     try {
       mkdirSync(dirname(this.file), { recursive: true })
-      writeFileSync(this.file, JSON.stringify({ version: 2, totals: this.totals, entries: this.entries }), 'utf8')
     } catch {
-      /* the dashboard still serves from memory; persistence is best effort */
+      return
+    }
+    const release = acquireLedgerLock(this.file)
+    if (!release) return
+    try {
+      const onDisk = readLedgerFile(this.file)
+      const totals = onDisk?.totals ?? emptyTotals()
+      const entries = [...(onDisk?.entries ?? [])]
+      for (const entry of this.pending) {
+        addToTotals(totals, entry)
+        entries.push(entry)
+      }
+      const trimmed = entries.slice(-this.limit)
+      writeLedgerFile(this.file, { version: 2, totals, entries: trimmed })
+      this.totals = totals
+      this.entries = trimmed
+      this.pending = []
+    } catch {
+      /* keep the turn pending: the next record tries again */
+    } finally {
+      release()
     }
   }
 
@@ -2328,7 +2563,7 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans) 
 </head>
 <body>
 <h1>CLI provider usage</h1>
-<div class="sub">OpenCode, Grok and Codex CLI usage · ${windowLabel} · window ${windowLinks} · page refreshes every 20s · <a href="/llm-cli/usage.json?days=${windowDaysShown || 'all'}" style="color:#6fb3ff">JSON</a></div>
+<div class="sub">OpenCode, Grok and Codex CLI usage · ${windowLabel}${opencodeCli?.available && opencodeCli.scopeDays > 0 && opencodeCli.scopeDays > windowDaysShown ? ` (opencode covers ${opencodeCli.scopeDays}d, whole days only)` : ''} · window ${windowLinks} · page refreshes every 20s · <a href="/llm-cli/usage.json?days=${windowDaysShown || 'all'}" style="color:#6fb3ff">JSON</a></div>
 <div class="cards">
   <div class="card"><div class="k">Turns recorded</div><div class="v">${summary.turns}</div></div>
   <div class="card"><div class="k">Total spend</div><div class="v">$${summary.providers.reduce((sum, item) => sum + item.costUsd, 0).toFixed(4)}</div></div>
@@ -2438,7 +2673,15 @@ function normalizeConfig(raw) {
     const override = configured[id]
     if (override === false || override?.enabled === false) continue
     const merged = { ...base, ...(override && typeof override === 'object' ? override : {}) }
-    merged.bin = resolveBin(override?.bin ?? base.bin)
+    const resolvedBin = resolveBin(override?.bin ?? base.bin)
+    const launch = resolveWindowsShim(resolvedBin)
+    // A shim that cannot be read stays in place and is explained when a turn
+    // tries to start it, so one broken route does not fail the whole plugin.
+    merged.bin = launch?.bin ?? resolvedBin
+    merged.binArgs = launch?.prefix ?? []
+    if (!launch) {
+      merged.launchError = `cannot launch the Windows shim "${resolvedBin}". Set providers.bin to the real executable, or install a build that ships one.`
+    }
     // A profile may set the `opencode stats` invocation once, globally.
     if (id === 'opencode' && Array.isArray(config.opencodeStats?.args) && merged.statsArgs === undefined) {
       merged.statsArgs = config.opencodeStats.args
@@ -2554,6 +2797,7 @@ export {
   readGrokCliUsage,
   readGrokModelLimits,
   readCodexCliUsage,
+  resolveWindowsShim,
   readCodexModelList,
   renderUsageHtml,
   SignInManager,

@@ -6,6 +6,36 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0]
+
+### Fixed
+
+- **A sub-day window no longer overstates OpenCode's precision.**
+  `opencode stats --days` takes whole days, so a `5h` window was served one day
+  of data under a five-hour label. The view carries `scopeDays` and both pages
+  say the figure covers a day.
+- **The token mix adds up to the headline.** Slices are built where each CLI's
+  counting rule is known, so cache reads are subtracted from input for Grok and
+  Codex and kept beside it for OpenCode. Reasoning is reported separately under
+  the chart instead of being drawn as a slice that inflated the sum.
+- **A Grok per-model row has a total.** The session file gives no per-model
+  total, so the table's Total column read zero for every model.
+- **Two profiles can share one `usageFile`.** Writes take an exclusive lock,
+  merge with what is already on disk, and replace the file in one step. A turn
+  that cannot take the lock stays pending and retries on the next one instead
+  of replacing the file with its own view.
+- **A Windows CLI installed only as a `.cmd` shim launches.** The shim is read
+  and its real target is spawned, rather than the shim being handed to a shell.
+  A bare command name is now resolved on `PATH` with `PATHEXT`, so a global
+  install that ships only a shim is reachable at all.
+
+### Added
+
+- `scopeDays` and `mix` on every CLI usage view, and a per-entry `id` in the
+  ledger so merged writes can be deduplicated.
+- `resolveWindowsShim()` is exported, and the test suite covers the shim path,
+  the merge, the scope note and the mix arithmetic.
+
 ## [0.4.0]
 
 Each CLI is still read from its own source. This release makes the shape of

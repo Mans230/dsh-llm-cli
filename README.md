@@ -28,6 +28,11 @@ in `config.cwd`.
   - Grok Build — `grok` (sign in with `grok login --device-auth`)
   - OpenAI Codex — `codex` (sign in with `codex login --device-auth`)
 
+On Windows the plugin reads an npm `.cmd` shim and launches its real target
+instead of handing the shim to a shell, so prompt text never reaches a command
+line. A bare command name is looked up on `PATH` with `PATHEXT`, which is how a
+globally installed CLI that ships only a shim stays reachable.
+
 ## Install
 
 The package is a plugin **bundle**: `package.json` declares
@@ -81,6 +86,8 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
 
 - `cwd` — where the CLI agent runs a turn.
 - `usageFile` — the usage ledger (JSON). Counts only: never prompt or reply text.
+  Writes take a lock and merge with what is on disk, so two profiles can share
+  one file without losing each other's turns.
 - `providers.<id>` — `false`/`{enabled:false}` to disable a route; `models` to
   offer an explicit list (otherwise whatever the CLI lists); `bin`,
   `defaultModel`, `displayName`, `contextWindow` to override.
@@ -151,6 +158,15 @@ The two views can split the same total differently. Grok's session file counts
 cached input inside `inputTokens`, while the turn's own usage event reports it
 separately, so one turn reads as 16,404 input in the CLI view and 14,740 input
 plus 1,664 cache reads in the ledger. Both add up to 17,492.
+
+Each view also carries `mix`, three slices that add up to its own `totalTokens`,
+built where the CLI's counting rule is known: OpenCode counts cache beside
+input, Grok and Codex count it inside. Reasoning is reported separately and is
+named under the chart rather than drawn as a slice.
+
+`opencode stats --days` takes whole days, so a sub-day window is served at one
+day. That view carries `scopeDays` and the page says so, instead of a `5h` label
+covering a day of data.
 
 ## What each CLI can and cannot report
 

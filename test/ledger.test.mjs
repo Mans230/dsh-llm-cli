@@ -3,7 +3,7 @@
  * OpenCode-shaped NDJSON turn (text + tokens + cost) and a failing turn, then
  * checks the usage ledger recorded both.
  */
-import { rmSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -110,6 +110,25 @@ const legacy = new UsageLedger(legacyFile).summary()
 assertEqual(legacy.providers.find((row) => row.key === 'paid').costTurns, 2, 'a legacy row with spend keeps its figure')
 assertEqual(legacy.providers.find((row) => row.key === 'free').costTurns, 0, 'a legacy row with no spend is not assumed to have reported')
 rmSync(legacyFile, { force: true })
+
+// Two profiles can point at one usageFile. Neither may replace the file with
+// its own view, and neither may lose the other's turns.
+const shared = join(tmpdir(), `dsh-llm-cli-ledger-shared-${process.pid}.json`)
+rmSync(shared, { force: true })
+const first = new UsageLedger(shared)
+const second = new UsageLedger(shared)
+first.record({ at: 1, ms: 10, provider: 'codex', model: 'a', inputTokens: 10, outputTokens: 1, ok: true })
+second.record({ at: 2, ms: 10, provider: 'grok', model: 'b', inputTokens: 20, outputTokens: 2, ok: true })
+first.record({ at: 3, ms: 10, provider: 'codex', model: 'a', inputTokens: 30, outputTokens: 3, ok: true })
+const merged = new UsageLedger(shared).summary()
+assertEqual(merged.turns, 3, 'both writers keep their turns')
+assertEqual(merged.providers.map((row) => row.key).sort(), ['codex', 'grok'], 'both routes survive the merge')
+assertEqual(merged.providers.find((row) => row.key === 'codex').inputTokens, 40, 'the first writer keeps both its turns')
+assertEqual(merged.providers.find((row) => row.key === 'grok').inputTokens, 20, 'the second writer keeps its turn')
+assertEqual(new Set(merged.recent.map((entry) => entry.id)).size, 3, 'every stored turn has its own id')
+assert(!existsSync(`${shared}.lock`), 'the lock is released after a write')
+assert(readFileSync(shared, 'utf8').includes('"version":2'), 'the file is rewritten in one piece')
+rmSync(shared, { force: true })
 
 rmSync(ledger, { force: true })
 assert(true, 'ledger test')

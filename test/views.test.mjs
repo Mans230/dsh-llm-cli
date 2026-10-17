@@ -138,6 +138,7 @@ assertEqual(grokFile.sessionCount, 1, 'the session file is counted once')
 assertEqual(grokFile.totalTokens, 17492, 'the session total is read')
 assertEqual(grokFile.costUsd.toFixed(5), '0.03684', 'cost ticks convert to dollars')
 assertEqual(grokFile.models.map((model) => model.id), ['grok-4.7-build'], 'per-model usage is read')
+assertEqual(grokFile.models[0].totalTokens, 17492, 'a per-model block gets a total of its own')
 assertEqual(grokFile.capabilities.cost, true, 'a recorded session makes cost available')
 assertEqual(grokFile.daily[0].date, grokAt.slice(0, 10), 'the turn lands on its own day')
 
@@ -198,6 +199,67 @@ assertEqual(payload.cliUsage.grok.available, false, 'grok has no recorded sessio
 assertEqual(payload.cliUsage.grok.capabilities.cost, false, 'grok reports no cost when it has no session')
 assertMatch(payload.cliUsage.grok.note, /no grok session usage recorded/, 'the note says no session was recorded')
 
+// --- 4b. A CLI that only counts whole days says which scope it actually used.
+const statsStub = (stats) => `process.stdout.write(${JSON.stringify(JSON.stringify(stats))});process.exit(0)`
+const statsDir = mkdtempSync(join(tmpdir(), 'dsh-llm-cli-stats-'))
+const statsScript = join(statsDir, 'stats.mjs')
+writeFileSync(
+  statsScript,
+  statsStub({
+    range: { from: 1, to: 2 },
+    sessions: 2,
+    prompts: 5,
+    steps: 9,
+    tokens: { input: 100, output: 10, reasoning: 7, cache: { read: 40, write: 0 } },
+    cost: 0.5,
+    activeDays: 1,
+    streak: 1,
+    activity: [{ date: '2026-10-17', steps: 9 }],
+    models: [],
+  }),
+  'utf8',
+)
+const dailyView = mount({
+  providers: {
+    opencode: {
+      bin: process.execPath,
+      // `stats` runs this script; the trailing --days argument is ignored by it.
+      statsArgs: [statsScript],
+      buildArgs: () => [statsScript],
+    },
+    grok: false,
+    codex: false,
+  },
+})
+const fiveHours = await describeRoutes(dailyView.adapter, dailyView.adapter.ledger, 5 / 24)
+assertEqual(fiveHours.windowDays, 5 / 24, 'the requested window is a fraction of a day')
+assertEqual(fiveHours.cliUsage.opencode.scopeDays, 1, 'opencode is scoped to its smallest whole day')
+assert(fiveHours.cliUsage.opencode.args.includes('--days'), 'the args carry the day scope')
+const fiveHoursHtml = renderUsageHtml(
+  fiveHours,
+  Date.now(),
+  fiveHours.routes,
+  '',
+  fiveHours.cliUsage,
+  fiveHours.plans,
+)
+assert(fiveHoursHtml.includes('whole days only'), 'the page says the opencode scope is whole days')
+
+// --- 4c. The token mix adds up to the view's own total.
+const openView = fiveHours.cliUsage.opencode
+assertEqual(openView.mix.slices.reduce((sum, slice) => sum + slice.value, 0), openView.totalTokens, 'opencode slices sum to its total')
+assertEqual(openView.mix.slices.map((slice) => slice.value), [100, 10, 40], 'opencode counts cache beside input')
+const grokFileMix = grokFile.mix.slices.reduce((sum, slice) => sum + slice.value, 0)
+assertEqual(grokFileMix, grokFile.totalTokens, 'grok slices sum to its total')
+assertEqual(
+  grokFile.mix.slices.find((slice) => slice.key === 'input').value,
+  16404 - 1664,
+  'grok input excludes the cache it already contains',
+)
+const codexView = payload.cliUsage.codex
+assertEqual(codexView.mix.slices.reduce((sum, slice) => sum + slice.value, 0), codexView.totalTokens, 'codex slices sum to its total')
+assertEqual(codexView.mix.slices.find((slice) => slice.key === 'input').value, 1200 - 900, 'codex input excludes cached input')
+
 // --- 5. The server-rendered page shows a dash, never a zero, for a figure the
 // CLI did not report.
 const html = renderUsageHtml(
@@ -229,6 +291,7 @@ const routeHtml = renderUsageHtml(
 assert(routeHtml.includes(`<div class="k">Codex (CLI)</div><div class="v">1 turns</div><div class="k">${dash}`), 'a route with no costed turns shows a dash for spend')
 
 rmSync(root, { recursive: true, force: true })
+rmSync(statsDir, { recursive: true, force: true })
 rmSync(multi.root, { recursive: true, force: true })
 rmSync(codex.root, { recursive: true, force: true })
 rmSync(grok.root, { recursive: true, force: true })

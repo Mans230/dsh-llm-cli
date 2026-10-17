@@ -2,7 +2,9 @@
  * Failure-path tests. Every case here used to end in a misleading success, a
  * misleading error, or a malformed stream.
  */
-import { rmSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { delimiter, join } from 'node:path'
+import { resolveWindowsShim } from '../index.js'
 import { mount, drain, textOf, turn, writeCli } from './_harness.mjs'
 import { assert, assertEqual, assertMatch } from './_assert.mjs'
 
@@ -128,6 +130,41 @@ assertEqual(
   ['0:reasoning', '1:text'],
   'reasoning first keeps its index and text follows',
 )
+
+// --- 10. A Windows CLI installed only as a .cmd shim still launches, without a
+// shell, so a prompt containing `&` cannot become a command.
+if (process.platform === 'win32') {
+  const shimDir = join(root, 'shim')
+  mkdirSync(shimDir, { recursive: true })
+  const inner = join(shimDir, 'inner.mjs')
+  writeFileSync(
+    inner,
+    `process.stdout.write(JSON.stringify({ type: 'text', part: { text: 'SHIM-' + process.argv[2] } }) + '\\n')\nprocess.exit(0)`,
+  )
+  const shim = join(shimDir, 'mytool.cmd')
+  writeFileSync(shim, `@echo off\r\n"%dp0%\\inner.mjs" %*\r\n`)
+
+  const resolved = resolveWindowsShim(shim)
+  assertEqual(resolved.bin, process.execPath, 'a shim to a script resolves to node')
+  assertEqual(resolved.prefix, [inner], 'the script is passed before the CLI arguments')
+
+  // A bare name must be found on PATH the way a shell would find it.
+  const savedPath = process.env.PATH
+  process.env.PATH = `${shimDir}${delimiter}${savedPath}`
+  try {
+    const shimmed = mount({
+      providers: { opencode: { bin: 'mytool', buildArgs: () => ['ARGS & echo injected'] }, grok: false, codex: false },
+    })
+    const shimTurn = await drain(shimmed.adapter, turn('opencode', 'm'))
+    assertEqual(textOf(shimTurn), 'SHIM-ARGS & echo injected', 'the whole prompt reaches the CLI as one argument')
+    assertEqual(shimTurn.error, null, 'a shimmed turn does not fail')
+    assertEqual(shimmed.adapter.ledger.summary().recent[0].ok, true, 'the shimmed turn is ledgered')
+  } finally {
+    process.env.PATH = savedPath
+  }
+} else {
+  assertEqual(resolveWindowsShim('/usr/bin/env'), { bin: '/usr/bin/env', prefix: [] }, 'a non-Windows path is left alone')
+}
 
 rmSync(root, { recursive: true, force: true })
 rmSync(slow.root, { recursive: true, force: true })
