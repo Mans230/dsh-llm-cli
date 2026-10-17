@@ -1529,7 +1529,6 @@ class CliAdapter {
     if (found) return found
     return {
       contextWindow: route?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-      contextWindows: [],
       source:
         Object.keys(byModel).length === 0
           ? 'grok models cache unavailable: sign in with the grok CLI to refresh it'
