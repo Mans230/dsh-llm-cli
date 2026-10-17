@@ -6,7 +6,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describeRoutes, renderUsageHtml } from '../index.js'
+import { describeRoutes, readGrokCliUsage, renderUsageHtml } from '../index.js'
 import { mount, drain, turn, writeCli } from './_harness.mjs'
 import { assert, assertEqual, assertMatch } from './_assert.mjs'
 
@@ -93,6 +93,54 @@ assertEqual(
   'a repeated per-turn usage block is not summed',
 )
 
+// --- 3b. The Grok CLI does record its own sessions. This is the shape a real
+// session writes, captured from `grok -p` on this host.
+const grokAt = new Date(Date.now() - 120000).toISOString()
+const grokSession = {
+  inputTokens: 16404,
+  outputTokens: 1088,
+  cachedReadTokens: 1664,
+  cacheCreationTokens: 0,
+  reasoningTokens: 1086,
+  totalTokens: 17492,
+  modelCalls: 1,
+  costUsdTicks: 368400000,
+  turnCount: 1,
+  primaryModelId: 'grok-4.7-build',
+  modelUsage: {
+    'grok-4.7-build': {
+      inputTokens: 16404,
+      outputTokens: 1088,
+      cachedReadTokens: 1664,
+      cacheCreationTokens: 0,
+      reasoningTokens: 1086,
+      totalTokens: 17492,
+      modelCalls: 1,
+      costUsdTicks: 368400000,
+    },
+  },
+}
+const grokSessionDir = join(root, 'grok-usage', 'C%3A%5Cwork', '01a14a4e-412a-7e93-923d-7757e896c56a')
+mkdirSync(grokSessionDir, { recursive: true })
+writeFileSync(
+  join(grokSessionDir, 'usage.json'),
+  JSON.stringify({
+    sessionId: '01a14a4e-412a-7e93-923d-7757e896c56a',
+    updatedAt: grokAt,
+    session: grokSession,
+    turns: [{ turnNumber: 1, endedAt: grokAt, ...grokSession }],
+  }),
+  'utf8',
+)
+const grokFile = readGrokCliUsage(join(root, 'grok-usage'))
+assertEqual(grokFile.available, true, 'a written usage.json makes the grok view available')
+assertEqual(grokFile.sessionCount, 1, 'the session file is counted once')
+assertEqual(grokFile.totalTokens, 17492, 'the session total is read')
+assertEqual(grokFile.costUsd.toFixed(5), '0.03684', 'cost ticks convert to dollars')
+assertEqual(grokFile.models.map((model) => model.id), ['grok-4.7-build'], 'per-model usage is read')
+assertEqual(grokFile.capabilities.cost, true, 'a recorded session makes cost available')
+assertEqual(grokFile.daily[0].date, grokAt.slice(0, 10), 'the turn lands on its own day')
+
 // --- 4. Each route says what its CLI reports, and keeps the same shape when it
 // cannot answer at all.
 const rolloutDay = join(root, 'codex', 'sessions', '2026', '10', '17')
@@ -146,9 +194,9 @@ assertEqual(payload.cliUsage.opencode.capabilities.cost, true, 'opencode is know
 assertEqual(payload.cliUsage.codex.available, true, 'the codex view reads its rollout')
 assertEqual(payload.cliUsage.codex.capabilities.cost, false, 'codex never reports cost')
 assertMatch(payload.cliUsage.codex.capabilities.costReason, /never a cost|no cost/, 'the reason travels with the flag')
-assertEqual(payload.cliUsage.grok.available, false, 'grok has no usage file to read')
-assertEqual(payload.cliUsage.grok.capabilities.cost, false, 'grok reports no cost on this CLI version')
-assertMatch(payload.cliUsage.grok.note, /no usage\.json/, 'the note names the missing file')
+assertEqual(payload.cliUsage.grok.available, false, 'grok has no recorded session to read')
+assertEqual(payload.cliUsage.grok.capabilities.cost, false, 'grok reports no cost when it has no session')
+assertMatch(payload.cliUsage.grok.note, /no grok session usage recorded/, 'the note says no session was recorded')
 
 // --- 5. The server-rendered page shows a dash, never a zero, for a figure the
 // CLI did not report.
@@ -165,7 +213,7 @@ assert(!html.includes('Codex cost</div><div class="v">$0.00'), 'the codex cost c
 assert(html.includes(`Grok CLI tokens</div><div class="v">${dash}`), 'an unavailable grok token card is a dash')
 assert(!html.includes('Grok CLI tokens</div><div class="v">0<'), 'an unavailable grok token card is not a zero')
 assert(html.includes('never a cost'), 'the page explains why a cost is missing')
-assert(html.includes('no usage.json'), 'the page explains why grok usage is missing')
+assert(html.includes('no grok session usage recorded'), 'the page explains why grok usage is missing')
 
 // --- 6. The harness route card also avoids a confident zero for a route whose
 // CLI never reports cost.

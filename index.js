@@ -257,7 +257,7 @@ function readGrokCliUsage(dir) {
   const empty = {
     ...blankCliUsage('grok session usage.json files', {
       cost: false,
-      costReason: 'the Grok CLI records no token or cost usage here',
+      costReason: 'the Grok CLI has not recorded a session on this host yet',
       rateLimits: false,
       perStep: false,
     }),
@@ -343,11 +343,11 @@ function readGrokCliUsage(dir) {
     models,
     daily,
     recentSessions: sessions.slice(0, 25),
-    note: available ? '' : 'the Grok CLI writes no usage.json on this version, so it reports no usage',
+    note: available ? '' : 'no grok session usage recorded yet',
     capabilities: {
       ...empty.capabilities,
       cost: available,
-      costReason: available ? undefined : 'the Grok CLI writes no usage.json on this version',
+      costReason: available ? undefined : 'the Grok CLI has not recorded a session on this host yet',
     },
   }
 }

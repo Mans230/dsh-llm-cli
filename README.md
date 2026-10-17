@@ -130,8 +130,9 @@ Two independent usage views are shown, and they answer different questions:
   - **Grok** — the CLI persists per-session token and cost accounting at
     `~/.grok/sessions/<workspace>/<sessionId>/usage.json`; the dashboard sums
     those files (per model, per day, per session). Cost is stored as ticks of
-    `1e-10` USD. Grok CLI 1.0.62 writes no such file, so this view reports
-    itself unavailable instead of showing zero.
+    `1e-10` USD. The CLI writes that file when it runs a session itself, so a
+    host with no CLI-run session yet reports the view as unavailable instead of
+    showing zero.
   - **OpenCode** — the dashboard runs `opencode stats --json --all --models
     --cost` (cached) for lifetime totals, per-model usage and a daily activity
     series.
@@ -143,9 +144,13 @@ Two independent usage views are shown, and they answer different questions:
 
 Each CLI is read from the source that suits it, and every view carries
 `available`, `source`, `note` and `capabilities`. A figure a CLI does not report
-is a dash, not a zero. Codex cost is always a dash, and so is Grok usage on the
-current build. Only OpenCode reports usage per agent step, so only its turns sum
-their steps.
+is a dash, not a zero. Codex cost is always a dash. Only OpenCode reports usage
+per agent step, so only its turns sum their steps.
+
+The two views can split the same total differently. Grok's session file counts
+cached input inside `inputTokens`, while the turn's own usage event reports it
+separately, so one turn reads as 16,404 input in the CLI view and 14,740 input
+plus 1,664 cache reads in the ledger. Both add up to 17,492.
 
 ## What each CLI can and cannot report
 
