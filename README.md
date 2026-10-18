@@ -12,7 +12,7 @@ reads what those CLIs record about themselves.
 | --- | --- | --- |
 | `opencode` | OpenCode CLI | `opencode run --model <m> --format json` |
 | `grok` | Grok Build CLI | `grok -p <prompt> -m <m> --output-format streaming-json` |
-| `codex` | OpenAI Codex CLI | `codex exec --json -m <m> <prompt>` |
+| `codex` | OpenAI Codex CLI | `codex app-server --listen stdio://` |
 
 Each CLI owns its authentication and agent loop. Text deltas are forwarded as
 the CLI emits them. Turns use the DSH session workspace and forward its system
@@ -216,8 +216,8 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
 
   Each shows every route and model with the limits its CLI publishes, plus
   charts: daily tokens per CLI, an activity heatmap and token mix, cost by model,
-  per-model usage tables, recorded Codex 5-hour and weekly subscription-limit
-  snapshots with observation times and stale markers, and — when `plan` budgets or `plan.grok.weeklyPremium` are configured —
+  per-model usage tables, live Codex 5-hour and weekly subscription limits
+  with recorded snapshots as a fallback, and — when `plan` budgets or `plan.grok.weeklyPremium` are configured —
   used-vs-budget gauges. It also carries a **Check for updates** button and, when
   a newer version exists, **Update now**.
 - `GET /llm-cli/update.json` and `POST /llm-cli/update` for the same two actions
@@ -229,10 +229,18 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
   pretending the running process changed.
 
 The browser Refresh button and `?force=1` on either usage endpoint invalidate
-the plugin's caches and reread the original CLI sources. Codex quota snapshots
-remain the last values its CLI recorded, including quota-only events. Refresh
-does not query a live account quota; values older than five minutes or past
-their reset time are marked stale, even if subsequent chat activity is recent.
+the plugin's caches and reread the original CLI sources. Codex also queries
+`account/rateLimits/read` through the installed CLI's app-server, using its
+existing login without starting an inference turn. If unavailable, the page labels
+the recorded fallback and marks old or expired snapshots stale. Token history
+still comes from CLI rollout files. Ordinary requests reuse the usage cache.
+
+Codex replies stream through `item/agentMessage/delta` events. The route uses
+read-only sandboxing and disables interactive approvals by default. Set
+`providers.codex.appServer: false` to use the older `exec --json` transport;
+a custom `buildArgs` also selects that transport unless explicitly overridden.
+Set `providers.codex.liveQuota: false` to disable live quota requests. A custom
+`appServerArgs` array can override the app-server launch arguments.
 
 ## Usage data sources
 

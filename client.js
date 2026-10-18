@@ -693,13 +693,13 @@ window.__ModuleLoader__.load({
                   'div',
                   { key: title, style: S.card },
                   h('div', { style: S.k }, title),
-                  h('div', { style: S.v }, `${(limit.usedPercent ?? 0).toFixed(0)}% recorded`),
+                  h('div', { style: S.v }, `${(limit.usedPercent ?? 0).toFixed(0)}% ${codex?.limitsSource === 'live' ? 'used' : 'recorded'}`),
                   h(Gauge, {
                     percent: (limit.usedPercent ?? 0) / 100,
                     label: `${(limit.usedPercent ?? 0).toFixed(0)}% used`,
                     detail: `${minutes >= 1440 ? `${Math.round(minutes / 1440)}d` : `${Math.round(minutes / 60)}h`} window \u00b7 resets ${when(limit.resetsAt)}`,
                   }),
-                  h('div', { style: S.note }, `Recorded snapshot: ${when(codex?.limitsObservedAt?.[key])}${codex?.limitsStale?.[key] ? ' (stale)' : ''}. Refresh rereads CLI files; it does not fetch a live quota.`),
+                  h('div', { style: S.note }, `${codex?.limitsSource === 'live' ? 'Live quota checked:' : 'Recorded snapshot:'} ${when(codex?.limitsObservedAt?.[key])}${codex?.limitsStale?.[key] ? ' (stale)' : ''}. ${codex?.limitsSource === 'live' ? 'Refresh queries Codex account quota.' : 'Live quota unavailable; showing the recorded CLI snapshot.'}`),
                 ),
               ),
             )

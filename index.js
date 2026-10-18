@@ -4,7 +4,7 @@
  * Routes:
  *   opencode  -> the OpenCode CLI  (`opencode run --model <m> --format json`)
  *   grok      -> the Grok Build CLI (`grok -p <prompt> -m <m> --output-format streaming-json`)
- *   codex     -> the OpenAI Codex CLI (`codex exec --json -m <m> <prompt>`)
+ *   codex     -> the OpenAI Codex app-server (streamed JSON-RPC over stdio)
  *
  * The CLI owns authentication and model access; this adapter only maps the
  * harness message/stream vocabulary onto one headless CLI turn. The CLI agent
@@ -1251,10 +1251,61 @@ function parseCodexLine(line) {
   return null
 }
 
-/**
- * Preserve Codex's native counters: cached input is inside input_tokens and
- * reasoning is a subset of output. The stream boundary adapts disjoint input.
- */
+/** Adapt app-server notifications to the same chunks as other CLI routes. */
+function parseCodexServerPacket(packet) {
+  const params = packet?.params ?? {}
+  if (packet?.method === 'item/agentMessage/delta') return { text: params.delta }
+  if (packet?.method === 'item/reasoning/summaryTextDelta') return { reasoning: params.delta }
+  if (packet?.method === 'thread/tokenUsage/updated') {
+    const u = params.tokenUsage?.total
+    if (!u) return null
+    const mapped = codexUsage({ input_tokens: u.inputTokens, output_tokens: u.outputTokens,
+      cached_input_tokens: u.cachedInputTokens, reasoning_output_tokens: u.reasoningOutputTokens, total_tokens: u.totalTokens })
+    return { usage: { ...mapped, inputTokens: Math.max(0, mapped.inputTokens - mapped.cacheReadTokens) } }
+  }
+  return null
+}
+
+/** A bounded, quota-only RPC: never starts an inference turn or reads credentials. */
+async function readLiveCodexLimits(route, cwd) {
+  const child = spawnCommand(route, route.appServerArgs ?? ['app-server', '--listen', 'stdio://'],
+    { cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  child.stdin.on('error', () => {})
+  child.stderr.resume()
+  const reader = createInterface({ input: child.stdout, crlfDelay: Infinity })
+  const send = packet => child.stdin.write(JSON.stringify(packet) + '\n')
+  return await new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (error, result) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      reader.close()
+      child.kill()
+      error ? reject(error) : resolve(result)
+    }
+    const timer = setTimeout(() => finish(new Error('Codex live quota request timed out')), 8000)
+    child.on('error', error => finish(error))
+    child.on('close', () => finish(new Error('Codex exited before returning live quota')))
+    reader.on('line', line => {
+      let packet
+      try { packet = JSON.parse(line) } catch { return }
+      if (packet.error) return finish(new Error(packet.error.message ?? 'Codex quota request failed'))
+      if (packet.id === 1) {
+        send({ method: 'initialized' })
+        send({ id: 2, method: 'account/rateLimits/read' })
+      }
+      if (packet.id === 2) {
+        const limits = packet.result?.rateLimitsByLimitId?.codex ?? packet.result?.rateLimits
+        if (!limits || (!limits.primary && !limits.secondary)) return finish(new Error('Codex returned no account quota windows'))
+        finish(null, limits)
+      }
+    })
+    send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'dsh_llm_cli', version: currentVersion() } } })
+  })
+}
+
+/** Preserve native counters; the stream boundary subtracts cached input. */
 function codexUsage(usage) {
   const inputTokens = toCount(usage.input_tokens)
   const outputTokens = toCount(usage.output_tokens)
@@ -1765,6 +1816,26 @@ class CliAdapter {
         }
       }
     }
+    const codexRoute = this.config.providers.codex
+    if (fullCodex && codexRoute?.liveQuota) {
+      try {
+        const live = await readLiveCodexLimits(codexRoute, this.config.cwd)
+        const observedAt = Date.now()
+        fullCodex.limits = {}
+        fullCodex.limitsObservedAt = {}
+        fullCodex.limitsStale = {}
+        for (const key of ['primary', 'secondary']) {
+          const window = live[key]
+          fullCodex.limits[key] = window ? { usedPercent: window.usedPercent, windowMinutes: window.windowDurationMins, resetsAt: window.resetsAt * 1000 } : null
+          fullCodex.limitsObservedAt[key] = window ? observedAt : null
+          fullCodex.limitsStale[key] = false
+        }
+        fullCodex.limitsSource = 'live'
+      } catch (error) {
+        fullCodex.limitsSource = 'recorded'
+        fullCodex.liveQuotaError = String(error.message).slice(0, 300)
+      }
+    }
     if (this.config.providers.opencode) {
       try {
         value.opencode = await readOpencodeCliUsage(
@@ -1873,6 +1944,7 @@ class CliAdapter {
     let promptDir
     let child
     let acpPrompt
+    let codexInput
     const removePromptDir = () => { if (promptDir) { try { rmSync(promptDir, { recursive: true, force: true }) } catch { /* best effort */ } } }
     try {
       const prompt = buildPrompt(options, this.config.includeSystemPrompt === true) + (bridgeEnabled ? toolBridgePrompt(offeredTools) : '')
@@ -1899,10 +1971,11 @@ class CliAdapter {
       }
       options.signal?.throwIfAborted()
       if (provider === 'grok' && images.length && route.imageTransport === 'acp') acpPrompt = [{ type: 'text', text: prompt }, ...imageContent]
-      const args = route.buildArgs(options.model, prompt, promptFile, { cwd, sandbox: route.sandbox, images })
+      if (provider === 'codex' && route.appServer) codexInput = [{ type: 'text', text: prompt }, ...images.map(path => ({ type: 'localImage', path }))]
+      const args = codexInput ? (route.appServerArgs ?? ['app-server', '--listen', 'stdio://']) : route.buildArgs(options.model, prompt, promptFile, { cwd, sandbox: route.sandbox, images })
       child = spawnCommand(route, args, {
         cwd, windowsHide: true, env: process.env,
-        stdio: [acpPrompt ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+        stdio: [acpPrompt || codexInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       })
       child.stdin?.on('error', () => {})
     } catch (error) {
@@ -1949,6 +2022,11 @@ class CliAdapter {
     let reasoningText = ''
     let cliError = ''
     let stdout = ''
+    let codexCompleted = false
+    let codexTurnStarted = false
+    let codexThreadId
+    let codexTurnId
+    const codexTextItems = new Set()
     let acpCompleted = false
     let acpStopReason
 
@@ -1960,11 +2038,45 @@ class CliAdapter {
 
       const reader = createInterface({ input: child.stdout, crlfDelay: Infinity })
       const send = (packet) => child.stdin?.write(JSON.stringify(packet) + '\n')
+      if (codexInput) send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'dsh_llm_cli', version: currentVersion() } } })
       if (acpPrompt) send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'dsh-llm-cli', version: currentVersion() } } })
       for await (const line of reader) {
         const trimmed = line.trim()
         if (trimmed.length === 0) continue
         stdout += `${line}\n`
+        let codexParsed
+        if (codexInput) {
+          let packet
+          try { packet = JSON.parse(trimmed) } catch { continue }
+          if (packet?.error) { cliError = packet.error.message ?? 'Codex app-server request failed'; child.kill() }
+          else if (packet?.id === 1) {
+            send({ method: 'initialized' })
+            send({ id: 2, method: 'thread/start', params: { model: options.model, cwd, sandbox: route.sandbox ?? 'read-only', approvalPolicy: 'never', ephemeral: true } })
+          } else if (packet?.id === 2) {
+            codexThreadId = packet.result?.thread?.id
+            if (!codexThreadId) { cliError = 'Codex returned no thread id'; child.kill() }
+            else send({ id: 3, method: 'turn/start', params: { threadId: codexThreadId, input: codexInput } })
+          } else if (packet?.id === 3) {
+            codexTurnId = packet.result?.turn?.id
+            codexTurnStarted = !!codexTurnId
+          } else if (packet?.method === 'turn/started') {
+            codexTurnId = packet.params?.turn?.id
+            codexTurnStarted = !!codexTurnId
+          } else if (packet?.method === 'turn/completed') {
+            const turn = packet.params?.turn
+            if (turn?.status === 'completed' && codexTurnStarted && turn.id === codexTurnId) codexCompleted = true
+            else cliError = turn?.error?.message ?? 'Codex turn did not complete successfully'
+            child.kill()
+          } else if (packet?.method && packet.id !== undefined) {
+            send({ id: packet.id, error: { code: -32601, message: 'Client request not supported; approvals are disabled' } })
+          }
+          codexParsed = parseCodexServerPacket(packet)
+          if (packet?.method === 'item/agentMessage/delta') codexTextItems.add(packet.params?.itemId)
+          if (packet?.method === 'item/completed' && packet.params?.item?.type === 'agentMessage' && !codexTextItems.has(packet.params.item.id)) {
+            codexTextItems.add(packet.params.item.id)
+            codexParsed = { text: packet.params.item.text }
+          }
+        }
         if (acpPrompt) {
           let packet
           try { packet = JSON.parse(trimmed) } catch { /* parser below handles non-JSON */ }
@@ -1985,7 +2097,7 @@ class CliAdapter {
               : { jsonrpc: '2.0', id: packet.id, error: { code: -32601, message: 'Client method not supported' } })
           }
         }
-        const parsed = route.parseLine ? route.parseLine(trimmed) : null
+        const parsed = codexInput ? codexParsed : route.parseLine ? route.parseLine(trimmed) : null
         if (parsed?.error) cliError = String(parsed.error).slice(0, 400)
         if (parsed?.usage) {
           // A route that reports usage per agent step accumulates it. A route
@@ -2020,6 +2132,8 @@ class CliAdapter {
       }
 
       const exit = await closed
+      if (codexCompleted && !cliError) exit.code = 0
+      if (codexInput && !codexCompleted && !cliError && !aborted && !timedOut) cliError = 'Codex app-server exited before completing the turn'
       if (acpCompleted && !cliError) exit.code = 0
       if (acpPrompt && !acpCompleted && !cliError && !aborted && !timedOut) cliError = 'Grok ACP exited before completing the prompt'
 
@@ -3254,7 +3368,7 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans, 
   ]) {
     if (limit) {
       planCards.push(
-        `<div class="card"><div class="k">${title} (reported by the CLI)</div><div class="v">${(limit.usedPercent ?? 0).toFixed(0)}% recorded</div>${gaugeHtml((limit.usedPercent ?? 0) / 100, `${minutes >= 1440 ? `${Math.round(minutes / 1440)}d` : `${Math.round(minutes / 60)}h`} window · resets ${stamp(limit.resetsAt)}`)}<div class="k">Recorded snapshot: ${escapeHtml(stamp(codexCli?.limitsObservedAt?.[key]))}${codexCli?.limitsStale?.[key] ? ' (stale)' : ''}. Refresh rereads CLI files; it does not fetch a live quota.</div></div>`,
+        `<div class="card"><div class="k">${title} (reported by the CLI)</div><div class="v">${(limit.usedPercent ?? 0).toFixed(0)}% ${codexCli?.limitsSource === 'live' ? 'used' : 'recorded'}</div>${gaugeHtml((limit.usedPercent ?? 0) / 100, `${minutes >= 1440 ? `${Math.round(minutes / 1440)}d` : `${Math.round(minutes / 60)}h`} window · resets ${stamp(limit.resetsAt)}`)}<div class="k">${codexCli?.limitsSource === 'live' ? 'Live quota checked:' : 'Recorded snapshot:'} ${escapeHtml(stamp(codexCli?.limitsObservedAt?.[key]))}${codexCli?.limitsStale?.[key] ? ' (stale)' : ''}. ${codexCli?.limitsSource === 'live' ? 'Refresh queries Codex account quota.' : 'Live quota unavailable; showing the recorded CLI snapshot.'}</div></div>`,
       )
     }
   }
@@ -3615,6 +3729,10 @@ function normalizeConfig(raw) {
     // Codex's model catalog lives in its own cache file, not in a CLI command.
     if (id === 'codex' && typeof override?.readModels !== 'function') {
       merged.readModels = () => readCodexModelList(merged.modelsCacheFile ?? codexModelsCache)
+    }
+    if (id === 'codex') {
+      merged.appServer = override?.appServer ?? (typeof override?.buildArgs !== 'function')
+      merged.liveQuota = override?.liveQuota ?? merged.appServer
     }
     if (id === 'codex' && merged.sandbox !== undefined && !['read-only', 'workspace-write'].includes(merged.sandbox)) {
       throw new Error('llm-cli: providers.codex.sandbox must be read-only or workspace-write')

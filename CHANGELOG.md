@@ -8,6 +8,9 @@ All notable changes to this plugin are documented here. The format follows
 
 ### Added
 
+- Stream Codex replies through app-server delta notifications and read live
+  account quota, with explicit recorded-file fallback when unavailable.
+
 - Install missing CLIs on first use into a user-scoped managed directory, with
   concurrent-install deduplication, bounded installers and version verification.
 - Add Web setup controls and host-only authenticated install/sign-in/status/
