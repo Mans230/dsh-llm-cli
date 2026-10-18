@@ -27,7 +27,6 @@ window.__ModuleLoader__.load({
       input: '#5b9dff',
       output: '#46c98b',
       cache: '#a97bff',
-      reasoning: '#e9a15a',
       cost: '#e46c8f',
       warn: '#e9b34a',
       bad: '#e46c6c',
@@ -107,16 +106,15 @@ window.__ModuleLoader__.load({
     }
 
     // ------------------------------------------------------------- primitives
-    function Panel({ title, right, children }) {
+    function Panel({ title, children }) {
       return h(
         'div',
         { style: S.chartCard },
-        (title || right) &&
+        title &&
           h(
             'div',
             { style: S.toolbarRow },
             h('div', { style: S.subheading }, title),
-            right ?? null,
           ),
         children,
       )
@@ -390,7 +388,7 @@ window.__ModuleLoader__.load({
         { title: `${label} token mix` },
         h(Donut, { segments }),
         usage.reasoningTokens > 0
-          ? h('p', { style: S.note }, `${counts(usage.reasoningTokens)} reasoning tokens are reported separately and are not part of the total above.`)
+          ? h('p', { style: S.note }, `${counts(usage.reasoningTokens)} reasoning tokens are included in output; they are not an extra slice.`)
           : null,
       )
     }
@@ -504,7 +502,19 @@ window.__ModuleLoader__.load({
             return response.json()
           })
           .then((data) => {
-            if (live) setState({ status: 'ready', data })
+            if (live) {
+              setState({ status: 'ready', data })
+              // The latest host snapshot supersedes earlier setup-action results.
+              setAuth(current => {
+                const next = { ...current }
+                for (const route of data.routes ?? []) {
+                  if (!next[route.id]) continue
+                  next[route.id] = { ...next[route.id], signedIn: route.signedIn }
+                  if (route.signedIn === true) next[route.id] = { ...next[route.id], pending: false, url: undefined, code: undefined, error: '' }
+                }
+                return next
+              })
+            }
           })
           .catch((error) => {
             if (live) setState({ status: 'error', error: String((error && error.message) || error) })
@@ -526,7 +536,7 @@ window.__ModuleLoader__.load({
         return h(
           'span',
           null,
-          'Model routes served by the OpenCode, Grok and Codex CLIs installed on this host, with published model limits, recorded Codex quota snapshots, usage charts, and optional usage-plan budgets.',
+          'Model routes served by the OpenCode, Grok and Codex CLIs installed on this host, with published model limits, live Codex quota with recorded fallback, usage charts, and optional usage-plan budgets.',
         )
       }
 
@@ -568,17 +578,15 @@ window.__ModuleLoader__.load({
         label: date,
         short: shortDay(date),
         values: {
-          inputTokens: day?.inputTokens,
+          inputTokens: Math.max(0, (day?.inputTokens ?? 0) - (day?.cacheReadTokens ?? 0)),
           outputTokens: day?.outputTokens,
           cacheReadTokens: day?.cacheReadTokens,
-          reasoningTokens: day?.reasoningTokens,
         },
       }))
       const tokenSeries = [
         { key: 'inputTokens', label: 'Input', color: COLOR.input },
         { key: 'outputTokens', label: 'Output', color: COLOR.output },
         { key: 'cacheReadTokens', label: 'Cache read', color: COLOR.cache },
-        { key: 'reasoningTokens', label: 'Reasoning', color: COLOR.reasoning },
       ]
       const costRows = (grok?.models ?? [])
         .filter((model) => (Number(model.costUsd) || 0) > 0)
@@ -592,10 +600,9 @@ window.__ModuleLoader__.load({
         label: date,
         short: shortDay(date),
         values: {
-          inputTokens: day?.inputTokens,
+          inputTokens: Math.max(0, (day?.inputTokens ?? 0) - (day?.cacheReadTokens ?? 0)),
           outputTokens: day?.outputTokens,
           cacheReadTokens: day?.cacheReadTokens,
-          reasoningTokens: day?.reasoningTokens,
         },
       }))
       // A CLI that counts whole days serves a sub-day window at its smallest
@@ -610,7 +617,7 @@ window.__ModuleLoader__.load({
       ].filter(Boolean)
       const toolbar = h(
         'span',
-        { style: { display: 'inline-flex', gap: '8px', alignItems: 'center' } },
+        { style: { display: 'inline-flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' } },
         h(
           'span',
           { style: { display: 'inline-flex', border: HAIR, borderRadius: '7px', overflow: 'hidden' } },
@@ -763,7 +770,7 @@ window.__ModuleLoader__.load({
         // Charts
         h('div', { style: S.heading }, 'Charts'),
         grokDaily.length > 0
-          ? h(Panel, { title: 'Grok daily tokens (CLI)' }, h(ColumnChart, { data: grokDaily, series: tokenSeries }))
+          ? h(Panel, { title: 'Grok daily tokens (CLI)' }, h(ColumnChart, { data: grokDaily, series: tokenSeries }), h('p', { style: S.note }, 'Cached input is shown separately. Reasoning is included in output.'))
           : grok
             ? h(Panel, { title: 'Grok daily tokens (CLI)' }, h('p', { style: S.note }, grok.available ? 'No per-day grok turns recorded yet.' : `Grok usage unavailable: ${grok.note ?? ''}`))
             : null,
@@ -771,7 +778,7 @@ window.__ModuleLoader__.load({
           ? h(Panel, { title: 'Grok cost by model (CLI)' }, h(BarList, { rows: costRows, format: usd4, color: COLOR.cost }))
           : null,
         codexDaily.length > 0
-          ? h(Panel, { title: 'Codex daily tokens (CLI)' }, h(ColumnChart, { data: codexDaily, series: tokenSeries }))
+          ? h(Panel, { title: 'Codex daily tokens (CLI)' }, h(ColumnChart, { data: codexDaily, series: tokenSeries }), h('p', { style: S.note }, 'Cached input is shown separately. Reasoning is included in output.'))
           : codex
             ? h(Panel, { title: 'Codex daily tokens (CLI)' }, h('p', { style: S.note }, codex.available ? 'No per-day codex turns recorded yet.' : `Codex usage unavailable: ${codex.note ?? ''}`))
             : null,
@@ -819,9 +826,9 @@ window.__ModuleLoader__.load({
               const signedIn = typeof current.signedIn === 'boolean' ? current.signedIn : route.signedIn
               return h('div', { key: route.id, style: S.card },
                 h('div', { style: S.k }, route.displayName),
-                h('p', null, installed?.installed ? (signedIn ? 'Signed in' : 'Not signed in') : 'CLI not installed'),
+                h('p', null, installed?.installed ? (signedIn === null ? 'Sign-in unknown' : signedIn ? 'Signed in' : route.signInOptional ? 'Sign-in optional (free models need no sign-in)' : 'Not signed in') : 'CLI not installed'),
                 !installed?.installed ? h('button', { type: 'button', style: S.button, disabled: current.busy, onClick: () => providerAction(route.id, 'install') }, 'Install CLI') : null,
-                !signedIn && !current.pending ? h('button', { type: 'button', style: S.button, disabled: current.busy, onClick: () => providerAction(route.id, 'signin') }, installed?.installed ? 'Sign in' : 'Install and sign in') : null,
+                !signedIn && !current.pending ? h('button', { type: 'button', style: S.button, disabled: current.busy, onClick: () => providerAction(route.id, 'signin') }, installed?.installed ? (route.signInOptional ? 'Sign in for paid models' : 'Sign in') : 'Install and sign in') : null,
                 h('button', { type: 'button', style: S.button, disabled: current.busy, onClick: () => providerAction(route.id, 'status') }, 'Check sign-in'),
                 current.pending ? h('button', { type: 'button', style: S.button, disabled: current.busy, onClick: () => providerAction(route.id, 'cancel') }, 'Cancel sign-in') : null,
                 current.url ? h('p', null, h('a', { href: current.url, target: '_blank', rel: 'noreferrer', style: S.link }, 'Open sign-in page')) : null,

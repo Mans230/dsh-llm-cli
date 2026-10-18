@@ -94,6 +94,7 @@ assert(typeof loaded?.factory === 'function', 'client.js registers a module fact
 /** A fresh React stub; `overrides` seeds hook slots by index. */
 function makeReact(overrides = {}) {
   const cells = new Map()
+  const effects = []
   let slot = 0
   const React = {
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat().filter((child) => child != null && child !== false) }),
@@ -108,14 +109,14 @@ function makeReact(overrides = {}) {
         },
       ]
     },
-    useEffect: () => {},
+    useEffect: (fn) => { effects.push(fn) },
     useRef: (initial) => {
       const key = slot++
       if (!cells.has(key)) cells.set(key, { current: initial })
       return cells.get(key)
     },
   }
-  return { React, cells, reset: () => { slot = 0 } }
+  return { React, cells, effects, reset: () => { slot = 0 } }
 }
 
 function loadClient(overrides) {
@@ -124,7 +125,7 @@ function loadClient(overrides) {
     if (id === 'react') return stub.React
     throw new Error(`unexpected require: ${id}`)
   })
-  return { exportsObj, cells: stub.cells, reset: stub.reset }
+  return { exportsObj, cells: stub.cells, effects: stub.effects, reset: stub.reset }
 }
 
 const first = loadClient({ 0: { status: 'ready', data: payload } })
@@ -271,6 +272,36 @@ try{
  assertEqual(request.headers['x-llm-cli-setup'],'fixture-setup-token','the host action is authenticated')
  assertEqual(account.cells.get(7).value.codex.installed,true,'successful installation updates the route state')
 }finally{globalThis.fetch=savedFetch}
+
+// Daily stacks use the same disjoint input/cache accounting as the token mix.
+const dailyPayload=structuredClone(payload)
+for(const id of ['grok','codex']) dailyPayload.cliUsage[id]={...dailyPayload.cliUsage[id],available:true,daily:[{date:new Date().toISOString().slice(0,10),inputTokens:100,outputTokens:20,cacheReadTokens:40,reasoningTokens:5,totalTokens:120}]}
+const dailyClient=loadClient({0:{status:'ready',data:dailyPayload}})
+const columns=walk(tree(dailyClient)).filter(node=>node.type?.name==='ColumnChart')
+assertEqual(columns.length,2,'Grok and Codex daily charts render')
+for(const chart of columns) {
+ const sum=chart.props.data.reduce((sum,point)=>sum+chart.props.series.reduce((n,series)=>n+(point.values[series.key]??0),0),0)
+ assertEqual(sum,120,'daily chart equals native total without counting cache or reasoning twice')
+ assert(!chart.props.series.some(series=>series.key==='reasoningTokens'),'reasoning remains an annotation rather than an extra token slice')
+}
+const optionalPayload=structuredClone(payload)
+optionalPayload.routes=optionalPayload.routes.filter(route=>route.id==='opencode').map(route=>({...route,signedIn:false,signInOptional:true}))
+const optionalClient=loadClient({0:{status:'ready',data:optionalPayload},6:{actionToken:'fixture',providers:[{id:'opencode',installed:true}]}})
+assert(pageOf(optionalClient).includes('Sign-in optional'),'setup explains that OpenCode free models can run without login')
+const unknownPayload=structuredClone(optionalPayload);unknownPayload.routes[0].signedIn=null
+assert(pageOf(loadClient({0:{status:'ready',data:unknownPayload},6:{actionToken:'fixture',providers:[{id:'opencode',installed:true}]}})).includes('Sign-in unknown'),'unknown setup status is never presented as signed out')
+
+// Refresh must replace an earlier action status once the host sees a new login.
+const freshPayload=structuredClone(payload);freshPayload.routes.forEach(route=>{route.signedIn=true})
+const staleClient=loadClient({0:{status:'ready',data:payload},7:{codex:{signedIn:false,pending:false}}})
+tree(staleClient)
+try {
+ globalThis.fetch=async()=>({ok:true,json:async()=>freshPayload})
+ const cleanupUsage=staleClient.effects[2]()
+ await new Promise(resolve=>setTimeout(resolve,0))
+ assertEqual(staleClient.cells.get(7).value.codex.signedIn,true,'a refreshed host status replaces the stale setup action result')
+ cleanupUsage()
+} finally { globalThis.fetch=savedFetch }
 
 rmSync(root, { recursive: true, force: true })
 console.log('ok  client.test')

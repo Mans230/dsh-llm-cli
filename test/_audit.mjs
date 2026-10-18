@@ -430,6 +430,11 @@ if(mode === 'mutations'){
   for(const file of ['index.js','client.js','package.json','README.md','CHANGELOG.md','LICENSE','cordis.patch.yml'])fs.copyFileSync(join(repo,file),join(copy,file))
   fs.cpSync(join(repo,'test'),join(copy,'test'),{recursive:true})
   const cases=[
+    ['request-origin','index.js', "if (['forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'cf-connecting-ip', 'true-client-ip', 'x-real-ip'].some(key => headers[key] !== undefined)) return false", "/* regress: trust local proxy socket */"],
+    ['client','client.js', 'inputTokens: Math.max(0, (day?.inputTokens ?? 0) - (day?.cacheReadTokens ?? 0)),', 'inputTokens: day?.inputTokens,'],
+    ['client','client.js', "route.signInOptional ? 'Sign-in optional (free models need no sign-in)' : 'Not signed in'", "'Not signed in'"],
+    ['client','client.js', 'next[route.id] = { ...next[route.id], signedIn: route.signedIn }', 'next[route.id] = { ...next[route.id] }'],
+    ['codex-server','index.js', 'cached_input_tokens: u.cachedInputTokens', 'cached_input_tokens: 0'],
     ['setup','index.js','if (this.pending.has(provider)) return this.pending.get(provider)','if (false) return this.pending.get(provider)'],
     ['signin','index.js','if (settled.code !== 0) throw new Error','if (false) throw new Error'],
     ['signin','index.js','code === 0 && signedIn(text)','code === 0'],
@@ -468,7 +473,7 @@ if(mode === 'mutations'){
     ['views','index.js',"usage = parsed.usageDelta ? addUsage(usage ?? {}, parsed.usage) : parsed.usage","usage = parsed.usage"],
   ]
   for(const [suite,file,from,to] of cases){
-    const path=join(copy,file),original=fs.readFileSync(path,'utf8')
+    const path=join(copy,file),original=fs.readFileSync(path,'utf8').replaceAll('\r\n','\n')
     if(!original.includes(from)){log({suite,result:'UNVERIFIED',reason:`mutation target missing: ${from}`});process.exitCode=1;continue}
     try{fs.writeFileSync(path,original.replace(from,to));const result=command(process.execPath,[`test/${suite}.test.mjs`],{cwd:copy,timeout:90000});assert.notEqual(result.status,0);assert.match((result.stderr||'')+(result.stdout||''),/assertion failed/);log({suite,mutation:from,result:'DETECTED'})}finally{fs.writeFileSync(path,original)}
     absent()

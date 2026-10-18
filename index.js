@@ -3058,6 +3058,16 @@ class UpdateManager {
 
 /** True when the request came from this machine. */
 function isLoopbackRequest(request) {
+  // A local reverse proxy is not a local user. Never grant host privileges
+  // through a tunnel, even when its upstream socket is loopback.
+  const headers = Object.fromEntries(Object.entries(request?.headers ?? {}).map(([key, value]) => [key.toLowerCase(), value]))
+  if (['forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'cf-connecting-ip', 'true-client-ip', 'x-real-ip'].some(key => headers[key] !== undefined)) return false
+  if (headers.host !== undefined) {
+    try {
+      const hostname = new URL(`http://${headers.host}`).hostname.toLowerCase()
+      if (hostname !== 'localhost' && hostname !== '[::1]' && !/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) return false
+    } catch { return false }
+  }
   const raw = String(request?.socket?.remoteAddress ?? '')
   const address = raw.startsWith('::ffff:') ? raw.slice(7) : raw
   return address === '::1' || address === 'localhost' || address.startsWith('127.')
@@ -3078,7 +3088,7 @@ function tokenFromRequest(request) {
   for (const part of String(request?.headers?.cookie ?? '').split(';')) {
     const trimmed = part.trim()
     if (!trimmed.startsWith('llm_cli_token=')) continue
-    return decodeURIComponent(trimmed.slice('llm_cli_token='.length))
+    try { return decodeURIComponent(trimmed.slice('llm_cli_token='.length)) } catch { return '' }
   }
   return ''
 }
@@ -3201,7 +3211,7 @@ async function describeRoutes(adapter, ledger, days = 0, { force = false } = {})
     windowLabel: cliUsage.windowLabel ?? '',
     routes,
     limitsNotice:
-      'A CLI-backed route reports only what its CLI publishes. The Grok CLI persists per-session token and cost accounting locally (read here for its own totals) and caches per-model context limits, but it exposes no subscription quota, no remaining-request count and no reset time, so any "plan" gauge is your own configured budget. The OpenCode CLI publishes usage through `opencode stats`, but no model context or output limits; those context windows use the labelled harness default. Token counts and cost under "this harness" are measured from this harness\u2019s own turns.',
+      'A CLI-backed route reports only what its CLI publishes. The Grok CLI persists per-session token and cost accounting locally (read here for its own totals) and caches per-model context limits, but it exposes no subscription quota, no remaining-request count and no reset time, so any "plan" gauge is your own configured budget. The OpenCode CLI publishes usage through `opencode stats` and model limits through `opencode api GET /api/model`; unavailable model limits use the labelled harness default. Token counts and cost under "this harness" are measured from this harness\u2019s own turns.',
   }
 }
 

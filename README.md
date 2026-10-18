@@ -182,7 +182,9 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
   refuse it. The plugin does not bypass that policy.
 - `toolBridge` — JSON harness-tool relay by default; `false` disables it.
 - `dashboardToken` — required for a dashboard request from another machine.
-  Loopback needs no token. A token shorter than 16 characters does not count as
+  Direct loopback needs no token. Forwarded requests and requests with a
+  non-local Host header count as remote, including local tunnel proxies.
+  Setup and update actions are refused through proxies. A token shorter than 16 characters does not count as
   configured, so a stray `token=1` cannot unlock remote reads.
 - `signInTtlMs` — how long a device-code sign-in may wait for a human before the
   plugin closes it (default 10 minutes).

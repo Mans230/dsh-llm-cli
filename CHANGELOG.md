@@ -6,6 +6,17 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Treat tunnel and proxy requests as remote so a loopback upstream socket
+  cannot bypass dashboard authentication or expose setup/update action tokens.
+- Refuse malformed dashboard cookies without throwing.
+- Make daily Grok/Codex token stacks agree with native totals: cached input is
+  separated from input and reasoning stays inside output.
+- Refresh stale setup sign-in status from host snapshots, distinguish optional
+  and unknown sign-in states, and wrap the toolbar on narrow screens.
+- Correct the dashboard explanation of OpenCode model-limit discovery.
+
 ### Added
 
 - Stream Codex replies through app-server delta notifications and read live
