@@ -53,7 +53,9 @@ function writeRollout(dir, { id, model, at, input, cached, output, reasoning, co
   )
 }
 
-const now = Date.now()
+// Keep the scenario aligned with its literal UTC day buckets. The host clock
+// crossed UTC midnight during a pre-push run and moved the relative fixtures.
+const now = Date.parse('2026-10-17T12:00:00Z')
 const iso = (msAgo) => new Date(now - msAgo).toISOString()
 
 // Newest session (and the one whose rate limits should win): absolute resets_at.

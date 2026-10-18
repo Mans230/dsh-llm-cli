@@ -252,5 +252,25 @@ try {
   globalThis.fetch = savedFetch
 }
 
+const account = loadClient({
+  0:{status:'ready',data:payload},
+  6:{actionToken:'fixture-setup-token',providers:payload.routes.map(route=>({id:route.id,installed:route.id!=='codex'}))},
+  7:{grok:{pending:true,url:'https://example.test/device',code:'TEST-1234'}},
+})
+const accountTree=tree(account),accountHtml=render(accountTree)
+assert(accountHtml.includes('CLI setup and sign-in'),'the page offers real host setup controls')
+assert(accountHtml.includes('TEST-1234')&&accountHtml.includes('Open sign-in page'),'a pending login displays its actual instruction')
+assert(buttonNamed(accountTree,'Install CLI')&&buttonNamed(accountTree,'Cancel sign-in'),'missing CLI and pending login have distinct actions')
+try{
+ let request
+ globalThis.fetch=async(url,options)=>{request={url,...options};return{ok:true,json:async()=>({installed:true,installing:false})}}
+ buttonNamed(accountTree,'Install CLI').props.onClick()
+ await new Promise(resolve=>setTimeout(resolve,0))
+ assertEqual(request.url,'/llm-cli/setup','setup actions call the host endpoint')
+ assertEqual(JSON.parse(request.body),{provider:'codex',action:'install'},'the clicked route and action reach the host')
+ assertEqual(request.headers['x-llm-cli-setup'],'fixture-setup-token','the host action is authenticated')
+ assertEqual(account.cells.get(7).value.codex.installed,true,'successful installation updates the route state')
+}finally{globalThis.fetch=savedFetch}
+
 rmSync(root, { recursive: true, force: true })
 console.log('ok  client.test')

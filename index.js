@@ -1298,11 +1298,11 @@ function launchErrorFor(route) {
 }
 
 /** Spawn one CLI process and collect its stdout/stderr to completion. */
-function runCapture(route, args, { cwd, timeoutMs }) {
+function runCapture(route, args, { cwd, timeoutMs, env = process.env, signal }) {
   return new Promise((resolve, reject) => {
     let child
     try {
-      child = spawnCommand(route, args, { cwd, windowsHide: true, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] })
+      child = spawnCommand(route, args, { cwd, windowsHide: true, env, signal, stdio: ['ignore', 'pipe', 'pipe'] })
     } catch (error) {
       reject(error)
       return
@@ -1443,6 +1443,7 @@ class CliAdapter {
     this.ctx = ctx
     this.config = config
     this.signIn = signIn
+    this.setup = signIn?.setup
     this.ledger = ledger
     this.listCache = new Map()
     this.limitsCache = undefined
@@ -1851,6 +1852,15 @@ class CliAdapter {
       throw new Error(message)
     }
 
+    try { await this.setup?.ensure(provider) } catch (error) {
+      this.recordFailure(provider, options.model, turnStartedAt, error.message)
+      throw error
+    }
+    if (options.signal?.aborted) {
+      this.recordFailure(provider, options.model, turnStartedAt, 'the request was aborted')
+      yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'the request was aborted', code: 'ABORTED' } } }
+      return
+    }
     const launchError = launchErrorFor(route)
     if (launchError) {
       this.recordFailure(provider, options.model, turnStartedAt, launchError)
@@ -2103,9 +2113,9 @@ class CliAdapter {
  */
 const LOGIN = {
   opencode: {
-    loginArgs: ['auth', 'login'],
+    loginArgs: ['auth', 'login', 'opencode', '--method', 'device'],
     statusArgs: ['auth', 'list'],
-    signedIn: (out) => !/no authenticated integrations/i.test(out),
+    signedIn: (out) => /\bstored\b|\boauth\b|\bapi[- ]key\b|\benv\b/i.test(out) && !/no (?:authenticated )?integrations|0 credentials|not authenticated/i.test(out),
     note: 'OpenCode free models need no sign-in; this is only for a paid OpenCode account.',
     optional: true,
   },
@@ -2125,17 +2135,122 @@ const LOGIN = {
 
 /** Pull the page and short code out of a CLI device-code prompt. */
 function parseDeviceInfo(text) {
+  text = String(text).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
   const url = /https?:\/\/[^\s'"]+/.exec(text)?.[0]
   const fromUrl = url ? /user_code=([A-Za-z0-9._-]+)/.exec(url)?.[1] : undefined
-  const code = fromUrl ?? /\b([A-Z0-9]{4}-[A-Z0-9]{4})\b/.exec(text)?.[1]
+  const code = fromUrl ?? /\b([A-Z0-9]{4}-[A-Z0-9]{4,8})\b/.exec(text)?.[1]
   return { url, code }
+}
+
+/** Resolve executables without a shell, including a VM's own PATH. */
+function executablePath(bin) {
+  if (typeof bin !== 'string' || !bin) return null
+  if (isAbsolute(bin) || /[/\\]/.test(bin)) return existsSync(bin) ? bin : null
+  if (process.platform === 'win32') return findOnPath(bin)
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    const file = join(dir, bin)
+    try { if (statSync(file).isFile()) return file } catch { /* next PATH entry */ }
+  }
+  return null
+}
+
+/** Installs only on the machine running this plugin, never through prompt text. */
+class CliSetupManager {
+  constructor(config) {
+    this.config = config
+    this.pending = new Map()
+    this.errors = new Map()
+    this.controller = new AbortController()
+  }
+
+  route(provider) {
+    if (typeof provider !== 'string' || !Object.hasOwn(this.config.providers, provider) || !Object.hasOwn(LOGIN, provider)) throw new Error('llm-cli: unknown or disabled provider')
+    const route = this.config.providers[provider]
+    if (!route || !LOGIN[provider]) throw new Error(`llm-cli: unknown or disabled provider "${provider}"`)
+    return route
+  }
+
+  target(provider) {
+    const root = join(this.config.cliInstallDir, provider)
+    return provider === 'grok' ? join(root, process.platform === 'win32' ? 'grok.exe' : 'grok')
+      : join(root, 'node_modules', '.bin', provider + (process.platform === 'win32' ? '.cmd' : ''))
+  }
+
+  adopt(provider, file, prefix) {
+    const route = this.route(provider)
+    const launch = prefix ? { bin: file, prefix } : resolveWindowsShim(file)
+    if (!launch || !executablePath(launch.bin) || launch.prefix.some(arg => /\.(?:m?js|cjs)$/.test(arg) && isAbsolute(arg) && !existsSync(arg))) return false
+    route.bin = launch.bin
+    route.binArgs = launch.prefix
+    delete route.launchError
+    return true
+  }
+
+  status(provider) {
+    const route = this.route(provider)
+    if (!executablePath(route.bin) && !route.binExplicit) this.adopt(provider, this.target(provider))
+    return { installed: !route.launchError && !!executablePath(route.bin), installing: this.pending.has(provider), error: this.errors.get(provider) ?? '' }
+  }
+
+  async ensure(provider, { manual = false } = {}) {
+    const route = this.route(provider)
+    if (this.status(provider).installed) return this.status(provider)
+    if (route.launchError && !route.installCommand) throw new Error(`llm-cli: ${route.launchError}`)
+    if (!manual && this.config.autoInstall === false) throw new Error(`llm-cli: ${provider} is not installed; autoInstall is disabled`)
+    if (route.binExplicit && !route.installCommand) throw new Error(`llm-cli: configured ${provider} binary is missing; fix providers.${provider}.bin or provide installCommand`)
+    if (this.pending.has(provider)) return this.pending.get(provider)
+    const job = this.install(provider).catch(error => { this.errors.set(provider, error.message); throw error }).finally(() => this.pending.delete(provider))
+    this.pending.set(provider, job)
+    return job
+  }
+
+  async install(provider) {
+    const route = this.route(provider), root = join(this.config.cliInstallDir, provider)
+    mkdirSync(root, { recursive: true })
+    this.errors.delete(provider)
+    let command = route.installCommand
+    let scriptDir
+    try {
+      if (!command && provider !== 'grok') {
+        const npm = executablePath('npm') ?? join(dirname(process.execPath), process.platform === 'win32' ? 'npm.cmd' : 'npm')
+        command = { bin: npm, args: ['install', '--prefix', root, '--no-audit', '--no-fund', '--package-lock=false', provider === 'codex' ? '@openai/codex' : '@opencode/cli'], binPath: this.target(provider) }
+      } else if (!command) {
+        const windows = process.platform === 'win32'
+        const response = await fetch(`https://x.ai/cli/install.${windows ? 'ps1' : 'sh'}`, { signal: AbortSignal.any([this.controller.signal, AbortSignal.timeout(30000)]) })
+        if (!response.ok) throw new Error(`llm-cli: Grok installer download failed (HTTP ${response.status})`)
+        const script = await response.text()
+        if (!script.length || script.length > 1024 * 1024) throw new Error('llm-cli: invalid Grok installer download')
+        scriptDir = mkdtempSync(join(tmpdir(), 'dsh-cli-install-'))
+        const file = join(scriptDir, windows ? 'install.ps1' : 'install.sh')
+        writeFileSync(file, script, { mode: 0o600 })
+        command = { bin: windows ? 'powershell.exe' : 'bash', args: windows ? ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file] : [file], env: { ...process.env, GROK_BIN_DIR: root }, binPath: this.target(provider) }
+      }
+      if (typeof command.bin !== 'string' || !Array.isArray(command.args) || !command.args.every(arg => typeof arg === 'string') || typeof command.binPath !== 'string') throw new Error('llm-cli: invalid installCommand configuration')
+      const executable = executablePath(command.bin) ?? command.bin
+      const launch = resolveWindowsShim(executable)
+      if (!launch) throw new Error('llm-cli: cannot resolve installer executable')
+      const result = await runCapture({ bin: launch.bin, binArgs: launch.prefix }, command.args, { cwd: root, env: command.env ?? process.env, signal: this.controller.signal, timeoutMs: this.config.installTimeoutMs })
+      if (result.code !== 0) throw new Error(`llm-cli: ${provider} installation failed (exit ${result.code ?? 'timeout'}); check network and file permissions`)
+      const previous = { bin: route.bin, binArgs: route.binArgs, launchError: route.launchError }
+      if (!this.adopt(provider, command.binPath, command.binArgs)) throw new Error(`llm-cli: ${provider} installer completed but its executable is missing`)
+      try {
+        const version = await runCapture(route, ['--version'], { cwd: root, timeoutMs: 30000, signal: this.controller.signal })
+        if (version.code !== 0 || !version.stdout.trim()) throw new Error(`llm-cli: installed ${provider} failed its version check`)
+      } catch (error) { Object.assign(route, previous); throw error }
+      return { ...this.status(provider), installing: false }
+    } finally { if (scriptDir) rmSync(scriptDir, { recursive: true, force: true }) }
+  }
+
+  dispose() { this.controller.abort() }
 }
 
 /** Drives one CLI's sign-in at a time and remembers what is waiting. */
 class SignInManager {
-  constructor(config) {
+  constructor(config, setup) {
     this.config = config
+    this.setup = setup
     this.pending = new Map()
+    this.failures = new Map()
     this.ttlMs = Number.isFinite(config?.signInTtlMs) && config.signInTtlMs > 0 ? config.signInTtlMs : DEFAULT_SIGN_IN_TTL_MS
   }
 
@@ -2158,6 +2273,7 @@ class SignInManager {
   /** Ask the CLI itself whether it is already signed in. */
   async status(provider) {
     const { route, signedIn, statusArgs } = this.routeFor(provider)
+    if (this.setup && !this.setup.status(provider).installed) return { signedIn: false, text: 'CLI not installed' }
     const { code, stdout, stderr } = await runCapture(route, statusArgs, {
       cwd: this.config.cwd,
       timeoutMs: 30000,
@@ -2165,7 +2281,7 @@ class SignInManager {
     const text = `${stdout}\n${stderr}`
     // A status probe must both succeed and identify an authenticated account.
     // OpenCode's negative-text predicate alone also accepts empty/error output.
-    return { signedIn: code === 0 && signedIn(text), text: text.trim() }
+    return { signedIn: code === 0 && signedIn(text), text: text.trim(), error: this.failures.get(provider) ?? '' }
   }
 
   /**
@@ -2174,8 +2290,11 @@ class SignInManager {
    */
   async start(provider, signal) {
     if (signal?.aborted) throw new Error('llm-cli: sign-in was aborted')
+    await this.setup?.ensure(provider)
+    if (signal?.aborted) throw new Error('llm-cli: sign-in was aborted')
     const existing = this.pending.get(provider)
     if (existing) return { url: existing.url, code: existing.code, resumed: true }
+    this.failures.delete(provider)
     const { route, loginArgs, note } = this.routeFor(provider)
     const child = spawnCommand(route, loginArgs, {
       cwd: this.config.cwd,
@@ -2184,8 +2303,14 @@ class SignInManager {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let text = ''
+    let entry
     const collect = (chunk) => {
       text += chunk
+      if (entry) {
+        const info = parseDeviceInfo(text)
+        entry.url = info.url
+        entry.code = info.code
+      }
     }
     child.stdout?.setEncoding('utf8')
     child.stderr?.setEncoding('utf8')
@@ -2198,12 +2323,13 @@ class SignInManager {
       child.on('error', (error) => resolve({ code: null, text: `${text}\n${error.message}` }))
     })
 
-    const entry = { child, done, url: undefined, code: undefined, timer: undefined }
+    entry = { child, done, url: undefined, code: undefined, timer: undefined }
     this.pending.set(provider, entry)
     const onAbort = () => this.cancel(provider)
     signal?.addEventListener('abort', onAbort, { once: true })
-    done.then(() => {
+    done.then((result) => {
       closed = true
+      if (!entry.cancelled && result.code !== 0) this.failures.set(provider, `The ${provider} sign-in failed (exit ${result.code ?? 'unknown'})`)
       clearTimeout(entry.timer)
       signal?.removeEventListener('abort', onAbort)
       if (this.pending.get(provider) === entry) this.pending.delete(provider)
@@ -2212,16 +2338,23 @@ class SignInManager {
     // Poll for the prompt rather than reading one line: the CLI may print the
     // URL and the code on separate writes.
     const deadline = Date.now() + 15000
+    let partialAt = 0
     let info = parseDeviceInfo(text)
-    while (!info.url && !info.code && Date.now() < deadline && !closed && !signal?.aborted) {
-      await new Promise((resolve) => setTimeout(resolve, 400))
+    while (Date.now() < deadline && !closed && !signal?.aborted) {
+      if (info.url && info.code) break
+      if (info.url || info.code) {
+        partialAt ||= Date.now()
+        if (Date.now() - partialAt >= 1000) break
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200))
       info = parseDeviceInfo(text)
     }
 
     if (signal?.aborted) throw new Error('llm-cli: sign-in was aborted')
-    if (closed && !info.url && !info.code) {
+    if (closed) {
       const settled = await done
-      throw new Error(`llm-cli: "${provider}" sign-in exited before printing a code: ${settled.text.trim().slice(0, 400)}`)
+      if (settled.code !== 0) throw new Error(`llm-cli: "${provider}" sign-in failed (exit ${settled.code ?? 'unknown'})`)
+      if (!info.url && !info.code) throw new Error(`llm-cli: "${provider}" sign-in exited before printing a code`)
     }
 
     entry.url = info.url
@@ -2238,6 +2371,7 @@ class SignInManager {
   cancel(provider) {
     const entry = this.pending.get(provider)
     if (!entry) return false
+    entry.cancelled = true
     this.pending.delete(provider)
     clearTimeout(entry.timer)
     if (entry.child.exitCode === null) entry.child.kill()
@@ -3378,7 +3512,7 @@ function buildTools(manager) {
     {
       name: 'provider_signin',
       description:
-        'Start signing a provider CLI into its account. Returns a page URL and a short code the user must confirm in their browser. Use it when the user asks to sign in to Grok or OpenCode, or when a CLI model reports it is not authenticated.',
+        'Install a missing provider CLI when automatic installation is enabled, then start account sign-in. Returns a real URL and device code for browser approval. Supports Grok, Codex and OpenCode.',
       parameters: SIGNIN_PARAMS,
       output: { schema: { type: 'string' }, render },
       async execute(args, exec) {
@@ -3464,6 +3598,7 @@ function normalizeConfig(raw) {
     const override = configured[id]
     if (override === false || override?.enabled === false) continue
     const merged = { ...base, ...(override && typeof override === 'object' ? override : {}) }
+    merged.binExplicit = override?.bin !== undefined
     const resolvedBin = resolveBin(override?.bin ?? base.bin)
     const launch = resolveWindowsShim(resolvedBin)
     // A shim that cannot be read stays in place and is explained when a turn
@@ -3488,6 +3623,9 @@ function normalizeConfig(raw) {
   }
   return {
     cwd: typeof config.cwd === 'string' && config.cwd.length > 0 ? config.cwd : process.cwd(),
+    autoInstall: config.autoInstall !== false,
+    cliInstallDir: typeof config.cliInstallDir === 'string' && isAbsolute(config.cliInstallDir) ? config.cliInstallDir : profilePath('.dsh', 'clis'),
+    installTimeoutMs: Number.isFinite(config.installTimeoutMs) && config.installTimeoutMs > 0 ? config.installTimeoutMs : 300000,
     timeoutMs: Number.isFinite(config.timeoutMs) && config.timeoutMs > 0 ? config.timeoutMs : DEFAULT_TIMEOUT_MS,
     usageFile:
       typeof config.usageFile === 'string' && config.usageFile.length > 0
@@ -3546,7 +3684,9 @@ export function apply(ctx, config) {
     ctx.logger?.warn?.('llm-cli: no provider routes enabled')
     return
   }
-  const manager = new SignInManager(normalized)
+  const setup = new CliSetupManager(normalized)
+  const manager = new SignInManager(normalized, setup)
+  ctx.effect?.(() => () => setup.dispose())
   ctx.effect?.(() => () => {
     for (const provider of manager.pending.keys()) manager.cancel(provider)
   })
@@ -3557,7 +3697,7 @@ export function apply(ctx, config) {
   })
 
   // An auto-updating install checks on its own. Nothing here runs unless the
-  // profile asked for it, so the plugin still makes no network calls by default.
+  // profile asked for it; no scheduled update traffic is enabled by default.
   if (normalized.autoUpdate) {
     const tick = async () => {
       try {
@@ -3621,6 +3761,43 @@ export function apply(ctx, config) {
       return handler(request, response)
     }
     const disposers = [
+      child.webServer.register({
+        kind: 'exact', path: '/llm-cli/setup.json',
+        handler: async (request, response) => {
+          response.writeHead(isLoopbackRequest(request) ? 200 : 403, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+          if (!isLoopbackRequest(request)) { response.end(JSON.stringify({ error: 'CLI setup is available on the host only' })); return }
+          response.end(JSON.stringify({ actionToken: updates.actionToken, autoInstall: normalized.autoInstall,
+            providers: Object.keys(normalized.providers).map(id => ({ id, ...setup.status(id) })) }))
+        },
+      }),
+      child.webServer.register({
+        kind: 'exact', path: '/llm-cli/setup',
+        handler: async (request, response) => {
+          const reply = (code, value) => { response.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); response.end(JSON.stringify(value)) }
+          const token = request?.headers?.['x-llm-cli-setup']
+          if (!isLoopbackRequest(request) || typeof token !== 'string' || token !== updates.actionToken) { reply(403, { error: 'Host setup action token required' }); return }
+          if (request.method !== 'POST') { reply(405, { error: 'Use POST' }); return }
+          try {
+            const body = JSON.parse(await readRequestBody(request))
+            const provider = body.provider
+            setup.route(provider)
+            let result
+            if (body.action === 'install') result = await setup.ensure(provider, { manual: true })
+            else if (body.action === 'cancel') result = { cancelled: manager.cancel(provider) }
+            else if (body.action === 'signin') {
+              const before = await manager.status(provider)
+              result = before.signedIn ? { signedIn: true } : { signedIn: false, pending: true, ...await manager.start(provider) }
+            } else if (body.action === 'status') {
+              const status = await manager.status(provider)
+              const pending = manager.pending.get(provider)
+              result = { signedIn: status.signedIn, pending: !!pending, url: pending?.url, code: pending?.code, error: status.signedIn ? '' : status.error }
+              if (status.signedIn && pending) manager.cancel(provider)
+            } else throw new Error('Unknown setup action')
+            adapter.invalidateCaches()
+            reply(200, { ...result, ...setup.status(provider) })
+          } catch (error) { reply(400, { error: String(error?.message ?? error) }) }
+        },
+      }),
       child.webServer.register({
         kind: 'exact',
         path: '/llm-cli/usage',

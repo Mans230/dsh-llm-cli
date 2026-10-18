@@ -31,6 +31,43 @@ async function check(label, run) {
 }
 absent()
 
+if(mode === 'setup-real'){
+  const root=scratch(),m=mount({cliInstallDir:join(root,'clis')})
+  for(const provider of ['codex','opencode','grok']){
+    const route=m.adapter.config.providers[provider]
+    route.bin='missing-setup-probe-'+provider;route.binArgs=[];route.binExplicit=false;delete route.launchError
+    await check('actual isolated installation and authentication: '+provider,async()=>{
+      const installed=await m.adapter.setup.ensure(provider)
+      const version=command(route.bin,[...route.binArgs,'--version'],{timeout:30000})
+      assert.equal(version.status,0)
+      const auth=await m.adapter.signIn.status(provider)
+      return{installed:installed.installed,version:version.stdout.trim(),signedIn:auth.signedIn,credentialsReplaced:false}
+    })
+  }
+}
+
+if(mode === 'signin-real'){
+  const m=mount(),profile=scratch()
+  // This entire probe runs in its own process. No real credential file is moved.
+  Object.assign(process.env,{USERPROFILE:profile,HOME:profile,CODEX_HOME:join(profile,'.codex'),XDG_DATA_HOME:join(profile,'data'),XDG_CONFIG_HOME:join(profile,'config'),XDG_CACHE_HOME:join(profile,'cache'),XDG_STATE_HOME:join(profile,'state')})
+  fs.mkdirSync(process.env.CODEX_HOME,{recursive:true})
+  for(const key of ['OPENAI_API_KEY','CODEX_API_KEY','CODEX_ACCESS_TOKEN','XAI_API_KEY','GROK_DEPLOYMENT_KEY'])delete process.env[key]
+  for(const provider of ['codex','grok','opencode']){
+    const route={...m.adapter.config.providers[provider]}
+    if(provider==='opencode'){route.statusArgs=['auth','list','--standalone'];route.loginArgs=['auth','login','opencode','--method','device','--standalone']}
+    const manager=new host.SignInManager({cwd:profile,signInTtlMs:30000,providers:{[provider]:route}})
+    await check('real isolated device flow: '+provider,async()=>{
+      const before=await manager.status(provider)
+      if(before.signedIn)return{unverified:'CLI still sees an existing account; no reauthentication attempted'}
+      try{
+        const started=await manager.start(provider)
+        assert(started.url&&started.code,'a real device URL and code are required')
+        return{signedInBefore:false,urlHost:started.url?new URL(started.url).host:null,deviceCodePresent:!!started.code,browserApproval:'UNVERIFIED',credentialFilesCopied:false}
+      }finally{const entry=manager.pending.get(provider);manager.cancel(provider);if(entry)await entry.done}
+    })
+  }
+}
+
 if(mode === 'runtime'){
   assert(process.env.DSH_RUNTIME_DIR,'set DSH_RUNTIME_DIR to an isolated install of the published DSH services')
   const req=createRequire(join(process.env.DSH_RUNTIME_DIR,'package.json'))
@@ -162,7 +199,7 @@ if (mode === 'probes') {
     let adapter, names, reads=0
     host.apply({logger:{info(){},warn(){}},llm:{registerAdapter(n,a){names=n;adapter=a}},effect(fn){effects.push(fn())},inject(deps,cb){cb({effect(fn){effects.push(fn())},tools:{register(t){tools.push(t)}},webServer:{register(route){web.add(route);return()=>web.delete(route)}}})}},
       {cwd:root,usageFile:join(root,'ledger.json'),providers:{opencode:{bin:process.execPath,models:['configured']},grok:false,codex:false}})
-    assert.deepEqual(names,['opencode']);assert.equal(web.size,4);assert.equal(tools.length,2)
+    assert.deepEqual(names,['opencode']);assert.equal(web.size,6);assert.equal(tools.length,2)
     assert.deepEqual((await adapter.listModels('opencode')).map(m=>m.id),['configured'])
     assert.equal(adapter.providerInfo('opencode').name,'OpenCode (CLI)')
     assert.equal(adapter.providerRetryPolicy(),undefined);assert.equal(adapter.imageRequestPricing(),undefined)
@@ -183,7 +220,7 @@ if (mode === 'probes') {
     await pending.done
     assert(pending.child.killed);assert.equal(adapter.signIn.pending.size,0)
     assert.equal(web.size,0)
-    return {webRoutesDisposed:4,activeLoginKilledOnDispose:true,hooks:'called against mock host in this probe',adapterUnregister:'this mock returns no disposer; real service disposal requires a separate runtime probe'}
+    return {webRoutesDisposed:6,activeLoginKilledOnDispose:true,hooks:'called against mock host in this probe',adapterUnregister:'this mock returns no disposer; real service disposal requires a separate runtime probe'}
   })
   await check('CLI list parser, broken shim, POSIX PATH lookup', async()=>{
     const root=scratch(),file=join(root,'models.mjs')
@@ -393,6 +430,9 @@ if(mode === 'mutations'){
   for(const file of ['index.js','client.js','package.json','README.md','CHANGELOG.md','LICENSE','cordis.patch.yml'])fs.copyFileSync(join(repo,file),join(copy,file))
   fs.cpSync(join(repo,'test'),join(copy,'test'),{recursive:true})
   const cases=[
+    ['setup','index.js','if (this.pending.has(provider)) return this.pending.get(provider)','if (false) return this.pending.get(provider)'],
+    ['signin','index.js','if (settled.code !== 0) throw new Error','if (false) throw new Error'],
+    ['signin','index.js','code === 0 && signedIn(text)','code === 0'],
     ['adapter','index.js','Math.max(0, mapped.inputTokens - mapped.cacheReadTokens)','mapped.inputTokens'],
     ['model-limits','index.js','Math.min(cap, nativeContext)','nativeContext'],
     ['execution','index.js','includeSystemPrompt: config.includeSystemPrompt !== false','includeSystemPrompt: config.includeSystemPrompt === true'],
@@ -413,7 +453,8 @@ if(mode === 'mutations'){
     ['failures','index.js',"if (aborted) {\n        this.recordFailure(provider, options.model, turnStartedAt, 'the request was aborted')","if (aborted) {"],
     ['failures','index.js',"const timeoutMs = Number.isFinite(route.timeoutMs) && route.timeoutMs > 0\n      ? route.timeoutMs\n      : this.config.timeoutMs","const timeoutMs = route.timeoutMs ?? this.config.timeoutMs"],
     ['ledger','index.js',"this.totals = readTotals(parsed?.totals) ?? totalsFrom(parsed?.entries)","this.totals = totalsFrom(parsed?.entries)"],
-    ['signin','index.js',"const code = fromUrl ?? /\\b([A-Z0-9]{4}-[A-Z0-9]{4})\\b/.exec(text)?.[1]","const code = undefined"],
+    ['signin','index.js',"const code = fromUrl ?? /\\b([A-Z0-9]{4}-[A-Z0-9]{4,8})\\b/.exec(text)?.[1]","const code = undefined"],
+    ['signin','index.js','if (info.url && info.code) break','if (info.url || info.code) break'],
     ['signin','index.js',"signedIn: code === 0 && signedIn(text)","signedIn: signedIn(text)"],
     ['signin','index.js',"if (this.pending.get(provider) === entry) this.pending.delete(provider)","/* retain a completed pending entry */"],
     ['dashboard','index.js',"ctx.logger?.info?.('llm-cli: usage dashboard at /llm-cli/usage')","ctx.logger?.info?.('llm-cli: usage dashboard at /llm-cli/usage ' + normalized.usageFile)"],

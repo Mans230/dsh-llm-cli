@@ -32,14 +32,35 @@ the turn. Missing attachment services produce an explicit error.
 
 - Node.js **20.11+** (the plugin itself has **no dependencies**; the peer
   `@deepseek-ai/*` packages come from the harness).
-- At least one of the supported CLIs on the host, signed in:
+- Internet access to install missing CLIs, or an existing installation:
   - OpenCode — `opencode` (the `opencode/*-free` model ids need no account)
   - Grok Build — `grok` (sign in with `grok login --device-auth`)
   - OpenAI Codex — `codex` (sign in with `codex login --device-auth`)
 
+Missing CLIs install automatically on their first model turn or sign-in request.
+The Web plugin page has **CLI setup and sign-in** controls: install, start
+sign-in, check status and cancel. Existing accounts are reused. New sign-ins
+display the CLI's real device URL/code and poll while you approve in a browser.
+OpenCode's account flow targets OpenCode Console's `device` method; free models
+can still run without an account. A successful status check, not a displayed
+code, determines whether the account is signed in.
+
+Installation runs as the DSH process user on the machine running this plugin.
+If DSH runs inside a VM, installation and credentials belong to that VM. This
+does not connect to a different VM or copy accounts between machines. OpenCode
+and Codex use their official npm packages (`@opencode/cli`, `@openai/codex`)
+under `~/.dsh/clis`; Grok uses the official x.ai installer with its binary
+directory set there. Nothing is installed globally by this plugin. The Grok
+installer may manage its own downloads/PATH integration under the user profile.
+Node/npm and, for Grok on POSIX, bash plus curl/wget must be available.
+
+Setup HTTP actions are host-only and require the host action token. Remote
+dashboard readers cannot obtain that token; use an authorized DSH
+`provider_signin` tool call or a loopback tunnel to the host for VM setup.
+
 On Windows the plugin reads an npm `.cmd` shim and launches its real target
-instead of handing the shim to a shell, so prompt text never reaches a command
-line. A bare command name is looked up on `PATH` with `PATHEXT`, which is how a
+instead of handing the shim to a shell, so prompt text never reaches a shell.
+A bare command name is looked up on `PATH` with `PATHEXT`, which is how a
 globally installed CLI that ships only a shim stays reachable.
 
 ## Install
@@ -134,6 +155,14 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
   The dashboard labels such a row `configured for this model` rather than
   claiming the CLI published it.
 - `timeoutMs` — per-turn timeout.
+- `autoInstall` — install a missing default CLI on first use (default `true`);
+  `false` requires an explicit Install CLI action or operator installation.
+- `cliInstallDir` — absolute managed-install directory (default `~/.dsh/clis`).
+- `installTimeoutMs` — installer timeout (default five minutes).
+- `providers.<id>.installCommand` — optional trusted operator configuration
+  `{ bin, args, binPath, binArgs? }` for offline/custom installers. HTTP callers
+  cannot supply commands. A missing explicitly configured `bin` is an error
+  unless an installCommand is also configured; it is never silently replaced.
 - `plan.<route>` — optional monthly budget for the dashboard gauges:
   `monthlyBudgetUsd`, `monthlyBudgetTokens` and `resetDay`.
 - `grokUsageDir` — where the Grok CLI keeps its session stores (default
@@ -157,7 +186,7 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
   configured, so a stray `token=1` cannot unlock remote reads.
 - `signInTtlMs` — how long a device-code sign-in may wait for a human before the
   plugin closes it (default 10 minutes).
-- `autoUpdate` — `false` (default) makes no network calls. `'check'` looks for a
+- `autoUpdate` — `false` (default) disables scheduled update requests. `'check'` looks for a
   newer published version on a timer, `'apply'` installs it too.
 - `updateIntervalMs` — how often an auto-updating install checks (default 24
   hours, minimum one minute).
@@ -171,6 +200,8 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
 - The three route groups in the model picker.
 - `provider_signin` / `provider_signin_status` tools, and an automatic
   device-code error when a route's CLI is signed out.
+- `GET /llm-cli/setup.json` and `POST /llm-cli/setup` provide host-only setup
+  status and install/sign-in/status/cancel actions for the Web plugin page.
 - `/llm-cli/usage` (HTML) and `/llm-cli/usage.json` (JSON) on the harness's own
   web server, backed by the ledger and the CLIs' own usage. A `?days=`/`?hours=`
   query (or the on-page 5h/7d/30d/90d/all buttons) scopes the charts to a
@@ -306,6 +337,10 @@ and assert the live ledger remains absent. They refuse to run if it exists.
 loopback source. `runtime` loads the published Cordis/DSH LLM services from an
 isolated install selected by `DSH_RUNTIME_DIR` and executes all three routes.
 `node test/_descendants.mjs` probes child cleanup on the current OS.
+`setup-real` installs all three CLIs in temporary directories and checks their
+versions/authentication. `signin-real` uses a separate temporary home to request
+real device instructions and cancels the pending attempts; it never claims
+human approval. Both require network access and are optional audit modes.
 `node test/_browser.mjs` creates an optional real React DOM browser fixture in
 `AUDIT_DIR`, downloading pinned React UMD scripts into that temporary HTML;
 its HTTP responses are fixtures. These optional probes do not add dependencies

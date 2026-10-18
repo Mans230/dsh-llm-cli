@@ -424,6 +424,42 @@ window.__ModuleLoader__.load({
       // dashboard does not make a network call on someone else's behalf.
       const [update, setUpdate] = React.useState({ status: 'idle' })
       const forceNext = React.useRef(false)
+      const [setup, setSetup] = React.useState(null)
+      const [auth, setAuth] = React.useState({})
+      React.useEffect(() => {
+        if (props?.view === 'summary') return
+        let live = true
+        fetch('/llm-cli/setup.json', { headers: { accept: 'application/json' } })
+          .then(response => response.ok ? response.json() : null)
+          .then(value => { if (live) setSetup(value) })
+          .catch(() => { if (live) setSetup(null) })
+        return () => { live = false }
+      }, [props?.view])
+      const providerAction = (provider, action) => {
+        if (!setup?.actionToken) return
+        setAuth(current => ({ ...current, [provider]: { ...current[provider], busy: true, error: '' } }))
+        fetch('/llm-cli/setup', {
+          method: 'POST',
+          headers: { accept: 'application/json', 'content-type': 'application/json', 'x-llm-cli-setup': setup.actionToken },
+          body: JSON.stringify({ provider, action }),
+        }).then(async response => {
+          const value = await response.json()
+          if (!response.ok) throw new Error(value.error ?? `HTTP ${response.status}`)
+          return value
+        }).then(value => {
+          setAuth(current => ({ ...current, [provider]: { ...value, busy: false } }))
+          setSetup(current => current ? { ...current, providers: current.providers?.map(row => row.id === provider ? { ...row, ...value } : row) } : current)
+          forceNext.current = true
+          setTick(value => value + 1)
+        }).catch(error => setAuth(current => ({ ...current, [provider]: { ...current[provider], busy: false, error: error.message } })))
+      }
+      React.useEffect(() => {
+        if (!setup?.actionToken || !Object.values(auth).some(value => value.pending)) return
+        const timer = setInterval(() => {
+          for (const [provider, value] of Object.entries(auth)) if (value.pending && !value.busy) providerAction(provider, 'status')
+        }, 5000)
+        return () => clearInterval(timer)
+      }, [auth, setup?.actionToken])
 
       const checkForUpdates = () => {
         setUpdate({ status: 'checking' })
@@ -772,6 +808,29 @@ window.__ModuleLoader__.load({
               ),
             )
           : h('p', { style: S.note }, 'No routes are enabled.'),
+
+        h('div', { style: S.heading }, 'CLI setup and sign-in'),
+        h('p', { style: S.note }, 'Installation and sign-in run on this DSH host. Approve the account in your browser; credentials stay with the CLI.'),
+        !setup?.actionToken
+          ? h('p', { style: S.note }, 'Open this page on the CLI host to manage setup, or use provider_signin in chat.')
+          : h('div', { style: S.cards }, routes.map(route => {
+              const installed = setup.providers?.find(row => row.id === route.id)
+              const current = auth[route.id] ?? {}
+              const signedIn = typeof current.signedIn === 'boolean' ? current.signedIn : route.signedIn
+              return h('div', { key: route.id, style: S.card },
+                h('div', { style: S.k }, route.displayName),
+                h('p', null, installed?.installed ? (signedIn ? 'Signed in' : 'Not signed in') : 'CLI not installed'),
+                !installed?.installed ? h('button', { type: 'button', style: S.button, disabled: current.busy, onClick: () => providerAction(route.id, 'install') }, 'Install CLI') : null,
+                !signedIn && !current.pending ? h('button', { type: 'button', style: S.button, disabled: current.busy, onClick: () => providerAction(route.id, 'signin') }, installed?.installed ? 'Sign in' : 'Install and sign in') : null,
+                h('button', { type: 'button', style: S.button, disabled: current.busy, onClick: () => providerAction(route.id, 'status') }, 'Check sign-in'),
+                current.pending ? h('button', { type: 'button', style: S.button, disabled: current.busy, onClick: () => providerAction(route.id, 'cancel') }, 'Cancel sign-in') : null,
+                current.url ? h('p', null, h('a', { href: current.url, target: '_blank', rel: 'noreferrer', style: S.link }, 'Open sign-in page')) : null,
+                current.code ? h('p', null, 'Device code: ', h('strong', null, current.code)) : null,
+                current.pending ? h('p', { style: S.note }, 'Waiting for browser approval. Status checks run every 5 seconds.') : null,
+                current.busy ? h('p', { style: S.note }, 'Working on the host…') : null,
+                current.error || installed?.error ? h('p', { style: S.note }, current.error || installed.error) : null,
+              )
+            })),
 
         h('div', { style: S.heading }, 'Model limits'),
         routes.length > 0

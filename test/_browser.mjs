@@ -13,8 +13,8 @@ const client=readFileSync(new URL('../client.js',import.meta.url),'utf8')
 const html=`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{margin:0;background:#111;color:white;font:14px Arial}*{box-sizing:border-box}</style></head><body><div id="summary"></div><div id="full"></div>
 <script>${scripts.join('\n')}</script><script>
 const payload=${payload};const requests=[];
-const immediate=value=>({then(fn){return immediate(fn(value))},catch(){return this}});
-window.fetch=(url)=>{requests.push(String(url));return immediate({ok:true,json:()=>String(url).includes('update')?{current:'0.7.1',latest:'0.7.1',updateAvailable:false}:payload})};
+const immediate=value=>({then(fn){const result=fn(value);return result&&typeof result.then==='function'?result:immediate(result)},catch(){return this}});
+window.fetch=(url,options)=>{requests.push(String(url));if(options?.body)requests.push(options.body);return immediate({ok:true,json:()=>String(url).includes('setup.json')?{actionToken:'browser-fixture',providers:payload.routes.map(r=>({id:r.id,installed:r.id!=='codex'}))}:String(url).endsWith('/setup')?{installed:true,signedIn:true}:String(url).includes('update')?{current:'0.7.1',latest:'0.7.1',updateAvailable:false}:payload})};
 window.__ModuleLoader__={load(m){window.client=m.factory(()=>React)}};
 </script><script>${client}</script><script>
 ReactDOM.flushSync(()=>{ReactDOM.createRoot(document.getElementById('summary')).render(React.createElement(client.LlmCliPage,{view:'summary'}));
@@ -27,6 +27,8 @@ const run=async()=>{
  ReactDOM.flushSync(()=>button('Refresh').click());await tick();assert(requests.some(u=>u.includes('force=1')),'manual refresh forces source reread');
  ReactDOM.flushSync(()=>button('30d').click());await tick();assert(requests.some(u=>u.includes('days=30')),'window click changes request');
  ReactDOM.flushSync(()=>button('Check for updates').click());await tick();assert(requests.some(u=>u.includes('update.json')),'update check click executes');
+ assert(button('Install CLI')&&button('Check sign-in'),'CLI setup controls render');
+ ReactDOM.flushSync(()=>button('Install CLI').click());await tick();assert(requests.some(u=>u.includes('"action":"install"')),'CLI install click reaches the host');
  const auto=document.querySelector('#full input[type="checkbox"]');assert(auto?.checked,'auto refresh initially enabled');
  ReactDOM.flushSync(()=>auto.click());assert(!auto.checked,'pause disables auto refresh');
  ReactDOM.flushSync(()=>auto.click());assert(auto.checked,'resume enables auto refresh');

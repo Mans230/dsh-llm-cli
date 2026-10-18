@@ -4,7 +4,7 @@
  * checks that a signed-out route surfaces the device code through the turn
  * error instead of just failing.
  */
-import { rmSync } from 'node:fs'
+import { rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -21,9 +21,11 @@ const missingCli = new SignInManager({ cwd: here, providers: {
 } })
 assertEqual((await missingCli.status('opencode')).signedIn, false, 'a missing OpenCode CLI cannot report signed in')
 const failedProbe = new SignInManager({ cwd: here, providers: {
-  opencode: { bin: process.execPath, statusArgs: ['-e', "console.error('status probe failed');process.exit(1)"] },
+  opencode: { bin: process.execPath, statusArgs: ['-e', "console.log('OpenCode stored');console.error('status probe failed');process.exit(1)"] },
 } })
 assertEqual((await failedProbe.status('opencode')).signedIn, false, 'a failed OpenCode status probe cannot report signed in')
+const emptyProbe = new SignInManager({cwd:here,providers:{opencode:{bin:process.execPath,statusArgs:['-e','process.exit(0)']}}})
+assertEqual((await emptyProbe.status('opencode')).signedIn,false,'empty successful output is not proof of authentication')
 
 const flag = join(tmpdir(), `dsh-llm-cli-stub-flag-${process.pid}`)
 process.env.STUB_FLAG = flag
@@ -34,6 +36,21 @@ const parsed = parseDeviceInfo(
 )
 assertEqual(parsed.url, 'https://accounts.x.ai/oauth2/device?user_code=BRT7-Y2BB', 'device URL is parsed')
 assertEqual(parsed.code, 'BRT7-Y2BB', 'device code is parsed')
+assertEqual(parseDeviceInfo('\x1b[94mAB12-CDE34\x1b[0m').code,'AB12-CDE34','longer ANSI-colored Codex device codes are preserved')
+const splitFile=join(tmpdir(),`dsh-login-split-${process.pid}.mjs`)
+writeFileSync(splitFile,"console.log('Open https://example.test/device');setTimeout(()=>console.log('AB12-CDE34'),750);setTimeout(()=>{},10000)")
+const split=new SignInManager({cwd:here,providers:{codex:{bin:process.execPath,loginArgs:[splitFile]}}})
+const splitInstruction=await split.start('codex')
+assertEqual(splitInstruction.code,'AB12-CDE34','the code is collected even when it follows the URL in a later write')
+const splitEntry=split.pending.get('codex');split.cancel('codex');if(splitEntry)await splitEntry.done
+rmSync(splitFile,{force:true})
+const rejectedFile=join(tmpdir(),`dsh-login-rejected-${process.pid}.mjs`)
+writeFileSync(rejectedFile,"console.log('Open https://example.test/device?user_code=FAIL-1234');process.exit(3)")
+const rejected=new SignInManager({cwd:here,providers:{codex:{bin:process.execPath,loginArgs:[rejectedFile]}}})
+let rejectedError
+try{await rejected.start('codex')}catch(error){rejectedError=error.message}
+assertMatch(rejectedError??'',/sign-in.*failed|exited/,'a failed login is not accepted just because its output contained a URL')
+rmSync(rejectedFile,{force:true})
 
 const manager = new SignInManager({
   cwd: here,

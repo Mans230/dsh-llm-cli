@@ -8,6 +8,12 @@ All notable changes to this plugin are documented here. The format follows
 
 ### Added
 
+- Install missing CLIs on first use into a user-scoped managed directory, with
+  concurrent-install deduplication, bounded installers and version verification.
+- Add Web setup controls and host-only authenticated install/sign-in/status/
+  cancel endpoints. Show real device instructions, poll for approval, reuse
+  existing credentials, and select OpenCode Console's device-auth method.
+
 - Read OpenCode's native model catalog, cap context at 500,000 without
   inflating smaller models, and preserve million-token free models and native
   output limits. Configured per-model limits retain precedence.
@@ -29,6 +35,11 @@ All notable changes to this plugin are documented here. The format follows
 
 ### Fixed
 
+- Empty successful OpenCode auth output is no longer accepted as proof of login.
+- Preserve longer ANSI-colored Codex device codes and collect codes printed
+  after their URL. A nonzero login exit no longer becomes a started sign-in
+  merely because its error output included a URL.
+
 - Subtract cached input at the Codex stream boundary to match DSH's disjoint
   token counters, while preserving Codex rollout readers' native accounting.
 
@@ -49,6 +60,9 @@ All notable changes to this plugin are documented here. The format follows
 - Plugin logs no longer include deployment paths or raw CLI/update diagnostics.
 
 ### Tests
+
+- Pin Codex rollout fixture time to its asserted UTC dates so the usage suite
+  remains deterministic across UTC midnight and future calendar dates.
 
 - Add authentication-probe, Codex reader/cache override and update-source
   regressions; the audit runner now selects CI evidence for the current commit.
