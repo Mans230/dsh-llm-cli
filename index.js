@@ -122,9 +122,9 @@ function defaultRoutes() {
       parseLine: parseOpencodeLine,
       buildArgs: (model, prompt, promptFile, execution = {}) =>
         execution.images?.length
-          ? ['run', '--model', model, '--format', 'json', '--file', execution.images[0], promptFile ? `Read the full transcript at ${promptFile} and answer its last user turn.` : prompt]
+          ? ['run', '--model', model, '--format', 'json', promptFile ? `Read the full transcript at ${promptFile} and answer its last user turn.` : prompt, '--file', execution.images[0]]
           : promptFile
-          ? ['run', '--model', model, '--format', 'json', '--file', promptFile, 'The attached file is the full conversation transcript. Reply with your next message only, with no commentary about the file.']
+          ? ['run', '--model', model, '--format', 'json', promptFile, 'The attached file is the full conversation transcript. Reply with your next message only, with no commentary about the file.', '--file', promptFile]
           : ['run', '--model', model, '--format', 'json', prompt],
     },
     grok: {
