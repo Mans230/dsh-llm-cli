@@ -120,11 +120,14 @@ function defaultRoutes() {
       defaultModel: 'opencode/deepseek-v4.1-flash-free',
       parseList: parseOpencodeList,
       parseLine: parseOpencodeLine,
+      // `--file` is a yargs [array] option: it swallows every following token
+      // that is not a flag, so the positional message must come BEFORE it or
+      // the message text itself is parsed as another path to attach.
       buildArgs: (model, prompt, promptFile, execution = {}) =>
         execution.images?.length
-          ? ['run', '--model', model, '--format', 'json', '--file', execution.images[0], promptFile ? `Read the full transcript at ${promptFile} and answer its last user turn.` : prompt]
+          ? ['run', '--model', model, '--format', 'json', promptFile ? `Read the full transcript at ${promptFile} and answer its last user turn.` : prompt, ...(promptFile ? ['--file', promptFile] : []), '--file', execution.images[0]]
           : promptFile
-          ? ['run', '--model', model, '--format', 'json', '--file', promptFile, 'The attached file is the full conversation transcript. Reply with your next message only, with no commentary about the file.']
+          ? ['run', '--model', model, '--format', 'json', 'The attached file is the full conversation transcript. Reply with your next message only, with no commentary about the file.', '--file', promptFile]
           : ['run', '--model', model, '--format', 'json', prompt],
     },
     grok: {
