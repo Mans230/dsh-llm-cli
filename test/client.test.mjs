@@ -183,6 +183,18 @@ for (const title of ['Status', 'Usage', 'Limits']) {
 }
 const disclosureTitles = walk(tree(first)).filter(element => element.type === 'summary').map(element => element.children[0])
 assert(disclosureTitles.includes('CLI setup and sign-in') && disclosureTitles.includes('Plugin version and updates'), 'setup and updates are collapsed into disclosures')
+assert(html.includes('This Harness · All time'), 'the Harness totals explicitly say they are all time')
+assert(html.includes('The date filter applies only to CLI-recorded usage.'), 'the date filter explains its scope')
+const readiness = pageOf(loadClient({
+  0: { status: 'ready', data: {
+    ...payload,
+    routes: payload.routes.map(route => route.id === 'grok' ? { ...route, signedIn: false } : route),
+    recent: [{ at: Date.now(), provider: 'opencode', model: 'opencode/free', ok: false, error: 'Free usage limit reached. (HTTP 429)' }],
+  } },
+}))
+assert(readiness.indexOf('Provider status') >= 0 && readiness.indexOf('Provider status') < readiness.indexOf('CLI-recorded usage'), 'provider status appears above charts')
+assert(readiness.includes('Sign in on the Harness host'), 'signed-out providers offer a next step')
+assert(readiness.includes('opencode/free hit its free usage limit') && readiness.includes('Choose another model'), 'recorded free quota errors identify the affected model and what to do')
 assert(html.includes('Recorded snapshot:')&&html.includes('(stale)'),'recorded quotas expose their age and stale status')
 assert(html.includes('Live quota unavailable; showing the recorded CLI snapshot.'),'fallback clearly identifies the recorded quota')
 buttonNamed(tree(first),'Refresh').props.onClick()

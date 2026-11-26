@@ -62,6 +62,7 @@ const local = await call(html, fakeRequest('/llm-cli/usage'))
 assertEqual(local.status, 200, 'a loopback request is served')
 assertMatch(local.headers['content-type'], /text\/html/, 'the page is html')
 assert(local.body.includes('CLI provider usage'), 'the page renders')
+assert(local.body.includes('This Harness · All time'), 'standalone totals explicitly say they are all time')
 await call(json,fakeRequest('/llm-cli/usage.json?force=1'))
 assert(invalidations>0,'the JSON force query invalidates source caches')
 const beforeHtml=invalidations

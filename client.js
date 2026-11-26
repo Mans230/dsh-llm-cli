@@ -691,6 +691,15 @@ window.__ModuleLoader__.load({
         h('span', { style: S.k }, `updated ${when(data.generatedAt)}`),
       )
 
+      const latestByModel = new Map()
+      for (const entry of data.recent ?? []) {
+        const key = `${entry.provider}:${entry.model}`
+        if (!latestByModel.has(key)) latestByModel.set(key, entry)
+      }
+      const freeLimitFailures = [...latestByModel.values()].filter(entry =>
+        entry.provider === 'opencode' && !entry.ok && /free usage limit reached/i.test(entry.error ?? ''),
+      )
+
       return h(
         'div',
         { 'data-llm-dashboard': '' },
@@ -707,12 +716,28 @@ window.__ModuleLoader__.load({
             },
           }, label)),
         ),
-        h(
-          'p',
-          { style: S.lead },
-          'Three model routes served by installed CLIs using their own authentication. Turns use the session workspace, forward harness instructions, and can request harness tools. Image support depends on the selected CLI and model.',
-        ),
+        h('h2', { style: S.heading, tabIndex: -1, 'data-dashboard-section': 'Status' }, 'Provider status'),
+        routes.length ? h('div', { style: S.cards }, routes.map(route => {
+          const installed = setup?.providers?.find(provider => provider.id === route.id)?.installed
+          const status = installed === false ? 'CLI not installed'
+            : route.signedIn === true ? 'Signed in'
+            : route.signInOptional ? 'Free models can run without sign-in'
+            : route.signedIn === false ? 'Signed out'
+            : 'Sign-in status unknown'
+          return h(StatCard, {
+            key: route.id,
+            label: route.displayName,
+            value: status,
+            sub: installed === false ? 'Install the CLI on the Harness host.'
+              : route.signedIn === false && !route.signInOptional ? 'Sign in on the Harness host to use this provider.'
+              : `${route.models.length} models listed`,
+          })
+        })) : h('p', { style: S.note }, 'No CLI providers are enabled.'),
+        ...freeLimitFailures.map(entry => h('p', { key: entry.model, style: S.note },
+          `${entry.model} hit its free usage limit on its last recorded request (${when(entry.at)}). Choose another model if it still fails.`,
+        )),
         h('div', { style: S.toolbarRow }, h('h2', { style: S.heading, tabIndex: -1, 'data-dashboard-section': 'Usage' }, `CLI-recorded usage \u00b7 ${windowLabel} (the CLIs\u2019 own accounting)`), toolbar),
+        h('p', { style: S.note }, 'The date filter applies only to CLI-recorded usage.'),
         coarseScopes.length > 0
           ? h(
               'p',
@@ -854,7 +879,8 @@ window.__ModuleLoader__.load({
         h(CliModelsTable, { grok, opencode, codex }),
 
         // This harness's own ledger
-        h('h2', { style: S.heading, tabIndex: -1, 'data-dashboard-section': 'Status' }, 'This harness (turns it recorded itself)'),
+        h('h2', { style: S.heading }, 'This Harness · All time'),
+        h('p', { style: S.note }, 'Totals from turns recorded by this Harness, regardless of the selected date range.'),
         routes.length > 0
           ? h(
               'div',
