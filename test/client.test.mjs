@@ -176,6 +176,13 @@ const walk = (node, found = []) => {
 const buttonNamed = (node, label) => walk(node).find((element) => element.type === 'button' && element.children.includes(label))
 
 const html = pageOf(first)
+const navigation = walk(tree(first)).find(element => element.type === 'nav' && element.props['aria-label'] === 'Dashboard sections')
+assert(navigation, 'the dashboard offers in-page section navigation')
+for (const title of ['Status', 'Usage', 'Limits']) {
+  assert(buttonNamed(navigation, title), `navigation includes ${title}`)
+}
+const disclosureTitles = walk(tree(first)).filter(element => element.type === 'summary').map(element => element.children[0])
+assert(disclosureTitles.includes('CLI setup and sign-in') && disclosureTitles.includes('Plugin version and updates'), 'setup and updates are collapsed into disclosures')
 assert(html.includes('This Harness · All time'), 'the Harness totals explicitly say they are all time')
 assert(html.includes('The date filter applies only to CLI-recorded usage.'), 'the date filter explains its scope')
 const readiness = pageOf(loadClient({

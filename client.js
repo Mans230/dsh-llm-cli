@@ -702,8 +702,21 @@ window.__ModuleLoader__.load({
 
       return h(
         'div',
-        null,
-        h('h2', { style: S.heading }, 'Provider status'),
+        { 'data-llm-dashboard': '' },
+        h('nav', { 'aria-label': 'Dashboard sections', style: { display: 'flex', flexWrap: 'wrap', gap: '8px' } },
+          ...['Status', 'Usage', 'Limits'].map(label => h('button', {
+            key: label,
+            type: 'button',
+            style: { ...S.button, minHeight: '44px', minWidth: '44px' },
+            onClick: (event) => {
+              const dashboard = event.currentTarget.closest('[data-llm-dashboard]')
+              const heading = dashboard?.querySelector(`[data-dashboard-section="${label}"]`)
+              heading?.focus({ preventScroll: true })
+              heading?.scrollIntoView({ block: 'start' })
+            },
+          }, label)),
+        ),
+        h('h2', { style: S.heading, tabIndex: -1, 'data-dashboard-section': 'Status' }, 'Provider status'),
         routes.length ? h('div', { style: S.cards }, routes.map(route => {
           const installed = setup?.providers?.find(provider => provider.id === route.id)?.installed
           const status = installed === false ? 'CLI not installed'
@@ -723,7 +736,7 @@ window.__ModuleLoader__.load({
         ...freeLimitFailures.map(entry => h('p', { key: entry.model, style: S.note },
           `${entry.model} hit its free usage limit on its last recorded request (${when(entry.at)}). Choose another model if it still fails.`,
         )),
-        h('div', { style: S.toolbarRow }, h('div', { style: S.heading }, `CLI-recorded usage \u00b7 ${windowLabel} (the CLIs\u2019 own accounting)`), toolbar),
+        h('div', { style: S.toolbarRow }, h('h2', { style: S.heading, tabIndex: -1, 'data-dashboard-section': 'Usage' }, `CLI-recorded usage \u00b7 ${windowLabel} (the CLIs\u2019 own accounting)`), toolbar),
         h('p', { style: S.note }, 'The date filter applies only to CLI-recorded usage.'),
         coarseScopes.length > 0
           ? h(
@@ -855,7 +868,7 @@ window.__ModuleLoader__.load({
           : null,
         h(
           'div',
-          { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '12px' } },
+          { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 280px), 1fr))', gap: '12px' } },
           grok && grok.available ? h(TokenMix, { usage: grok, label: 'Grok' }) : null,
           opencode && opencode.available ? h(TokenMix, { usage: opencode, label: 'OpenCode' }) : null,
           codex && codex.available ? h(TokenMix, { usage: codex, label: 'Codex' }) : null,
@@ -866,7 +879,7 @@ window.__ModuleLoader__.load({
         h(CliModelsTable, { grok, opencode, codex }),
 
         // This harness's own ledger
-        h('div', { style: S.heading }, 'This Harness · All time'),
+        h('h2', { style: S.heading }, 'This Harness · All time'),
         h('p', { style: S.note }, 'Totals from turns recorded by this Harness, regardless of the selected date range.'),
         routes.length > 0
           ? h(
@@ -885,7 +898,8 @@ window.__ModuleLoader__.load({
             )
           : h('p', { style: S.note }, 'No routes are enabled.'),
 
-        h('div', { style: S.heading }, 'CLI setup and sign-in'),
+        h('details', null,
+        h('summary', { style: { ...S.heading, cursor: 'pointer' } }, 'CLI setup and sign-in'),
         h('p', { style: S.note }, 'Installation and sign-in run on this DSH host. Approve the account in your browser; credentials stay with the CLI.'),
         !setup?.actionToken
           ? h('p', { style: S.note }, 'Open this page on the CLI host to manage setup, or use provider_signin in chat.')
@@ -907,8 +921,9 @@ window.__ModuleLoader__.load({
                 current.error || installed?.error ? h('p', { style: S.note }, current.error || installed.error) : null,
               )
             })),
+        ),
 
-        h('div', { style: S.heading }, 'Model limits'),
+        h('h2', { style: S.heading, tabIndex: -1, 'data-dashboard-section': 'Limits' }, 'Model limits'),
         routes.length > 0
           ? routes.map((route) =>
               h(
@@ -946,10 +961,10 @@ window.__ModuleLoader__.load({
         }),
 
         h('p', { style: S.note }, data.limitsNotice),
-        h('div', { style: S.heading }, 'Plugin version'),
         h(
-          'div',
+          'details',
           null,
+          h('summary', { style: { ...S.heading, cursor: 'pointer' } }, 'Plugin version and updates'),
           h(
             'div',
             { style: S.cards },
