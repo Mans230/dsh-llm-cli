@@ -41,6 +41,7 @@ const answered=await drain(m.adapter,{...turn('opencode','m'),tools,messages:[
   {role:'user',source:{kind:'tool',callId:call.id},content:[{type:'tool-result',toolCallId:call.id,content:[{type:'text',text:'RESULT_'+result}]}]},
 ]})
 assertEqual(textOf(answered),'BRIDGE_OK','a host tool result returns to the CLI with its correlation id')
+assertEqual(m.adapter.ledger.summary().recent[0].inputTokens,undefined,'missing CLI usage is not recorded as zero')
 for(const reply of ['DSH_TOOL_CALLS [{"name":"not_offered","arguments":{}}]','DSH_TOOL_CALLS {bad']){
   writeFileSync(cli,`console.log(JSON.stringify({type:'text',part:{text:${JSON.stringify(reply)}}}))`)
   const invalid=await drain(m.adapter,{...turn('opencode','m'),tools})
