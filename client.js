@@ -564,7 +564,11 @@ window.__ModuleLoader__.load({
           )
         }
         if (state.code === 'dashboard-token-required') {
+          if (window.location?.protocol === 'http:') {
+            return h('p', { style: S.lead }, 'Open the Harness over HTTPS to enter your dashboard token.')
+          }
           return h('form', {
+            method: 'post',
             onSubmit: (event) => {
               event.preventDefault()
               const input = event.currentTarget.elements.dashboardToken

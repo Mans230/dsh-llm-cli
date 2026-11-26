@@ -246,6 +246,10 @@ try {
   })
   usageEffect()
   await new Promise(resolve => setTimeout(resolve, 0))
+  globalThis.window.location = { protocol: 'http:' }
+  assert(pageOf(inline).includes('over HTTPS'), 'HTTP readers get instructions to use HTTPS')
+  assert(!pageOf(inline).includes('<form'), 'the dashboard does not ask for a token over HTTP')
+  delete globalThis.window.location
   const form = walk(tree(inline)).find(element => element.type === 'form')
   assert(form, 'a configured remote dashboard offers a token form in the panel')
   let request
@@ -263,6 +267,7 @@ try {
   assert(!request.url.includes('test-dashboard-secret'), 'the secret is not in the URL')
   assert(pageOf(inline).includes('Codex daily tokens'), 'successful access opens the charts in the same panel')
 } finally {
+  delete globalThis.window.location
   globalThis.fetch = savedFetch
 }
 
