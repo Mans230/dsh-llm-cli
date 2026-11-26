@@ -51,9 +51,9 @@ function fakeRequest(url, { address = '127.0.0.1', headers = {} } = {}) {
   return { url, headers, socket: { remoteAddress: address } }
 }
 
-async function call(route, request) {
+async function call(route, request, peer) {
   const response = fakeResponse()
-  await route.handler(request, response)
+  await route.handler(request, response, peer)
   return response
 }
 
@@ -86,6 +86,13 @@ const open = mount({
 const openJson = open.webRoutes.find((route) => route.path === '/llm-cli/usage.json')
 const openRemote = await call(openJson, fakeRequest('/llm-cli/usage.json', { address: '192.168.1.20' }))
 assertEqual(openRemote.status, 403, 'remote access is refused when no token is configured')
+const owner = { principal: { kind: 'owner' }, signal: new AbortController().signal }
+const proxied = fakeRequest('/llm-cli/usage.json', { address: '192.168.1.20', headers: { host: 'dsh.example.test' } })
+assertEqual((await call(openJson, proxied, owner)).status, 200, 'a signed-in Harness owner needs no dashboard token')
+assertEqual((await call(openJson, proxied, { ...owner, principal: { kind: 'guest' } })).status, 403, 'a non-owner peer still needs the dashboard token')
+const revoked = new AbortController()
+revoked.abort()
+assertEqual((await call(openJson, proxied, { ...owner, signal: revoked.signal })).status, 403, 'a revoked owner peer cannot bypass the dashboard token')
 assertMatch(openRemote.body, /dashboardToken/, 'that refusal names the config key')
 assertEqual(openRemote.headers['x-llm-cli-dashboard-error'], 'dashboard-token-unconfigured', 'the client can distinguish missing server configuration')
 assertEqual((await call(openJson, fakeRequest('/llm-cli/usage.json'))).status, 200, 'loopback still works with no token configured')

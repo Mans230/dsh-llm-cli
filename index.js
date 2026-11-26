@@ -3879,9 +3879,12 @@ export function apply(ctx, config) {
   // The dashboard rides the harness web server, so it answers on whatever
   // address the GUI already serves — no extra port or firewall rule.
   ctx.inject(['webServer'], (child) => {
-    // This machine may always read the dashboard. Any other caller needs the
-    // configured token, so a LAN-bound harness does not publish cost data.
-    const guard = (handler) => async (request, response) => {
+    // Newer web servers supply an authenticated peer. Older servers omit it
+    // and continue to use the plugin's loopback/token access rules.
+    const guard = (handler) => async (request, response, peer) => {
+      if (peer?.principal?.kind === 'owner' && peer.signal?.aborted === false) {
+        return handler(request, response)
+      }
       const auth = authorizeDashboard(request, normalized.dashboardToken)
       if (!auth.ok) {
         response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-llm-cli-dashboard-error': auth.code })
@@ -3932,6 +3935,7 @@ export function apply(ctx, config) {
       child.webServer.register({
         kind: 'exact',
         path: '/llm-cli/usage',
+        auth: 'required',
         handler: guard(async (request, response) => {
           try {
             let url
@@ -3965,6 +3969,7 @@ export function apply(ctx, config) {
       child.webServer.register({
         kind: 'exact',
         path: '/llm-cli/usage.json',
+        auth: 'required',
         handler: guard(async (request, response) => {
           try {
             const payload = await describeRoutes(adapter, ledger, windowDaysFromUrl(request?.url), { force: forceUsageFromUrl(request?.url) })
