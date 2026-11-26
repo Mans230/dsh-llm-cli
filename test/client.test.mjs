@@ -229,6 +229,48 @@ assertEqual(local.cells.get(4).value.status, 'ready', 'the update view starts re
 
 // A refused action surfaces as an error instead of being stored as a result.
 const savedFetch = globalThis.fetch
+const inline = loadClient()
+try {
+  tree(inline)
+  const usageEffect = inline.effects[2]
+  globalThis.fetch = async () => ({
+    ok: false, status: 403, headers: { get: () => 'dashboard-token-unconfigured' },
+  })
+  usageEffect()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert(pageOf(inline).includes('dashboardToken'), 'missing configuration tells the admin what to set')
+  assert(!pageOf(inline).includes('<form'), 'missing configuration does not offer a sign-in form')
+
+  globalThis.fetch = async () => ({
+    ok: false, status: 403, headers: { get: () => 'dashboard-token-required' },
+  })
+  usageEffect()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  globalThis.window.location = { protocol: 'http:' }
+  assert(pageOf(inline).includes('over HTTPS'), 'HTTP readers get instructions to use HTTPS')
+  assert(!pageOf(inline).includes('<form'), 'the dashboard does not ask for a token over HTTP')
+  delete globalThis.window.location
+  const form = walk(tree(inline)).find(element => element.type === 'form')
+  assert(form, 'a configured remote dashboard offers a token form in the panel')
+  let request
+  globalThis.fetch = async (url, options) => {
+    request = { url, ...options }
+    return { ok: true, json: async () => payload }
+  }
+  form.props.onSubmit({ preventDefault() {}, currentTarget: { elements: { dashboardToken: { value: 'test-dashboard-secret' } } } })
+  inline.effects.length = 0
+  tree(inline)
+  inline.effects[2]()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assertEqual(request.headers['x-llm-cli-token'], 'test-dashboard-secret', 'the inline form authenticates using a header')
+  assertEqual(request.headers['x-llm-cli-remember'], '1', 'the inline form opts into the dashboard cookie')
+  assert(!request.url.includes('test-dashboard-secret'), 'the secret is not in the URL')
+  assert(pageOf(inline).includes('Codex daily tokens'), 'successful access opens the charts in the same panel')
+} finally {
+  delete globalThis.window.location
+  globalThis.fetch = savedFetch
+}
+
 try {
   globalThis.fetch = async () => ({ ok: false, status: 403, json: async () => ({ error: 'forbidden' }) })
   buttonNamed(localTree, 'Update now').props.onClick()

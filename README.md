@@ -181,7 +181,8 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
   The latter requests workspace editing; the CLI's own host policy can still
   refuse it. The plugin does not bypass that policy.
 - `toolBridge` — JSON harness-tool relay by default; `false` disables it.
-- `dashboardToken` — required for a dashboard request from another machine.
+- `dashboardToken` — legacy or additional access for remote readers without
+  an authenticated Harness owner session.
   Direct loopback needs no token. Forwarded requests and requests with a
   non-local Host header count as remote, including local tunnel proxies.
   Setup and update actions are refused through proxies. A token shorter than 16 characters does not count as
@@ -207,9 +208,13 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
 - `/llm-cli/usage` (HTML) and `/llm-cli/usage.json` (JSON) on the harness's own
   web server, backed by the ledger and the CLIs' own usage. A `?days=`/`?hours=`
   query (or the on-page 5h/7d/30d/90d/all buttons) scopes the charts to a
-  trailing window. The two endpoints answer this machine only; another host
-  needs `dashboardToken`, presented as `?token=`, an `x-llm-cli-token` header,
-  or the `llm_cli_token` cookie the page sets from a query token.
+  trailing window. If the web server supplies an authenticated Harness owner
+  session, the dashboard loads immediately. On older hosts, direct loopback
+  can read both endpoints and remote readers need `dashboardToken`,
+  presented as `?token=`, an `x-llm-cli-token` header,
+  or the `llm_cli_token` cookie. On HTTPS, enter the token in **Settings →
+  LLM usage** to unlock the charts in place. The browser remembers access for
+  the session without putting the token in the URL.
 - The plugin's page in **two places** in the Web client, both rendering the same
   charted dashboard:
   - **Plugins → Grok + Codex + OpenCode (CLI)** (`client.js`, slot
