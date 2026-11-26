@@ -1668,27 +1668,21 @@ class CliAdapter {
       }
     }
     if (provider === 'codex') {
-      const now = Date.now()
-      if (!this.codexLimitsCache || now - this.codexLimitsCache.at > LIMITS_TTL_MS) {
-        let contextWindow
-        try {
-          contextWindow = readCodexCliUsage(this.config.codexUsageDir)?.contextWindow
-        } catch {
-          /* the CLI may not have recorded a turn yet */
-        }
-        this.codexLimitsCache = { at: now, contextWindow }
-      }
-      const contextWindow =
-        configuredContext ?? this.codexLimitsCache.contextWindow ?? route?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
+      const entry = readCodexCatalog(route?.modelsCacheFile ?? this.config.codexModelsCache).find(row => row.slug === model)
+      const window = entry?.context_window
+      const percent = entry?.effective_context_window_percent
+      const catalogContext = Number.isSafeInteger(window) && window > 0
+        ? Math.max(1, Math.floor(window * (Number.isFinite(percent) && percent > 0 && percent <= 100 ? percent / 100 : 1)))
+        : undefined
       return {
-        contextWindow,
+        contextWindow: configuredContext ?? catalogContext ?? route?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
         ...maxField,
         source:
           configuredContext !== undefined
             ? 'configured for this model'
-            : this.codexLimitsCache.contextWindow
-              ? 'from the codex session rollouts'
-              : 'harness default: Codex has not recorded a context window yet',
+            : catalogContext !== undefined ? 'Codex model catalog'
+              : route?.contextWindow ? 'configured for this route'
+                : 'harness default: Codex catalog has no context for this model',
       }
     }
     if (provider !== 'grok') {

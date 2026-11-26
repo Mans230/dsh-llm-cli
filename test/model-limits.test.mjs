@@ -65,4 +65,20 @@ assertEqual(catalog.adapter.limitsFor('opencode','opencode/beam-free').contextWi
 assertEqual(catalog.adapter.limitsFor('opencode','opencode/deepseek-v4.1-flash-free').contextWindow,200000,'a configured cap cannot inflate a smaller published capacity')
 assertEqual(catalog.adapter.limitsFor('opencode','opencode/deepseek-v4.1-flash').contextWindow,500000,'other catalog models use the requested 500k cap')
 assertEqual(catalog.adapter.limitsFor('opencode','opencode/deepseek-v4.1-flash').maxOutputTokens,384000,'output limits retain the published value')
+const codex = mount({ providers: { grok: false, opencode: false, codex: {
+  bin: process.execPath, contextWindow: 200000,
+  models: ['short', 'long', 'unknown', { id: 'override', contextWindow: 128000 }],
+} } })
+const codexCatalog = join(codex.root, 'models.json')
+writeFileSync(codexCatalog, JSON.stringify({ models: [
+  { slug: 'short', context_window: 272000, max_context_window: 872000 },
+  { slug: 'long', context_window: 500000, effective_context_window_percent: 95 },
+  { slug: 'override', context_window: 500000 },
+] }))
+codex.adapter.config.providers.codex.modelsCacheFile = codexCatalog
+assertEqual((await codex.adapter.resolveModel('codex','short')).context.contextWindow,272000,'Codex uses the exact model effective window, not its maximum')
+assertEqual(codex.adapter.limitsFor('codex','long').contextWindow,475000,'another model keeps its own window and CLI safety margin')
+assertEqual(codex.adapter.limitsFor('codex','long').source,'Codex model catalog','the source is identified')
+assertEqual(codex.adapter.limitsFor('codex','unknown').contextWindow,200000,'an unlisted model uses the route fallback')
+assertEqual(codex.adapter.limitsFor('codex','override').contextWindow,128000,'an explicit per-model override still wins')
 console.log('ok  model-limits.test')
