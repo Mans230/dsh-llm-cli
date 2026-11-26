@@ -89,6 +89,12 @@ or, in the Web UI, **Plugins → Add plugin** with this package's path. See
 
 ## Configuration
 
+In Harness's model picker, select a model and open its reasoning options.
+OpenCode uses the selected model's published variants; Grok 4.7 supports Low
+through Extra high. Codex uses its local model catalog and offers Standard and
+Fast choices for models that advertise Fast. Fast can increase usage.
+Leaving the picker on Default preserves the CLI's settings.
+
 The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
 
 ```yaml
