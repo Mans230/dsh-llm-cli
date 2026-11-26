@@ -3564,6 +3564,8 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans, 
 <body>
 <h1>CLI provider usage</h1>
 <div class="sub">OpenCode, Grok and Codex CLI usage · ${windowLabel}${opencodeCli?.available && opencodeCli.scopeDays > 0 && opencodeCli.scopeDays > windowDaysShown ? ` (opencode covers ${opencodeCli.scopeDays}d, whole days only)` : ''} · window ${windowLinks} · ${autoRefresh ? 'refreshes every 20s and keeps your place' : 'auto-refresh is off'} · ${refreshLink} · <a href="/llm-cli/usage.json?days=${windowDaysShown || 'all'}" style="color:#6fb3ff">JSON</a></div>
+<p class="note">The date filter applies only to CLI-recorded usage.</p>
+<h2>This Harness · All time</h2>
 <div class="cards">
   <div class="card"><div class="k">Turns recorded</div><div class="v">${summary.turns}</div></div>
   <div class="card"><div class="k">Total spend</div><div class="v">$${summary.providers.reduce((sum, item) => sum + item.costUsd, 0).toFixed(4)}</div></div>
@@ -3580,12 +3582,12 @@ ${limitRows ? `<h2>Model limits</h2>
 </table></div>` : ''}
 ${updateSection}
 ${notice ? `<p class="note">${escapeHtml(notice)}</p>` : ''}
-<h2>By provider</h2>
+<h2>Harness by provider · All time</h2>
 <div class="wrap"><table>
 <thead><tr><th>Provider</th><th>Turns</th><th>In</th><th>Out</th><th>Cache read</th><th>Cost</th><th>Avg</th><th>Errors</th><th>Last used</th></tr></thead>
 <tbody>${providerRows || '<tr><td colspan="9">No turns recorded yet.</td></tr>'}</tbody>
 </table></div>
-<h2>By model</h2>
+<h2>Harness by model · All time</h2>
 <div class="wrap"><table>
 <thead><tr><th>Model</th><th>Turns</th><th>In</th><th>Out</th><th>Cost</th><th>Avg</th></tr></thead>
 <tbody>${modelRows || '<tr><td colspan="6">No turns recorded yet.</td></tr>'}</tbody>

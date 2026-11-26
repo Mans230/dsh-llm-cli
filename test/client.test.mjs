@@ -176,6 +176,8 @@ const walk = (node, found = []) => {
 const buttonNamed = (node, label) => walk(node).find((element) => element.type === 'button' && element.children.includes(label))
 
 const html = pageOf(first)
+assert(html.includes('This Harness · All time'), 'the Harness totals explicitly say they are all time')
+assert(html.includes('The date filter applies only to CLI-recorded usage.'), 'the date filter explains its scope')
 assert(html.includes('Recorded snapshot:')&&html.includes('(stale)'),'recorded quotas expose their age and stale status')
 assert(html.includes('Live quota unavailable; showing the recorded CLI snapshot.'),'fallback clearly identifies the recorded quota')
 buttonNamed(tree(first),'Refresh').props.onClick()
