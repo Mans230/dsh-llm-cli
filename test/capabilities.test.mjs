@@ -4,6 +4,22 @@ import { mount, drain, turn, textOf } from './_harness.mjs'
 import { assert, assertEqual, assertMatch } from './_assert.mjs'
 import { redPng } from './_image.mjs'
 
+const preferences = mount({providers:{grok:{bin:process.execPath}, opencode:{bin:process.execPath,modelInfoArgs:false}, codex:{bin:process.execPath}}})
+const selected = preferences.adapter
+selected.opencodeModelInfo = {at:Date.now(), byModel:{'opencode/free':{variants:['low','high','--auto']}}}
+writeFileSync(join(preferences.root,'models.json'), JSON.stringify({models:[{
+  slug:'test-codex', supported_reasoning_levels:[{effort:'low'},{effort:'high'}], service_tiers:[{id:'priority'}],
+}]}))
+selected.config.providers.codex.modelsCacheFile = join(preferences.root,'models.json')
+assertEqual((await selected.resolveModel('opencode','opencode/free')).reasoning.efforts.map(e=>e.id),['low','high'],'only safe OpenCode variants appear')
+assertEqual((await selected.resolveModel('grok','grok-4.7')).reasoning.efforts.map(e=>e.id),['low','medium','high','xhigh'],'known Grok reasoning levels appear')
+assertEqual((await selected.resolveModel('codex','test-codex')).reasoning.efforts.map(e=>e.id),['standard','low','high','fast','fast-low','fast-high'],'Codex offers supported reasoning and speed tiers')
+assertMatch((await drain(selected,{...turn('opencode','opencode/free'),reasoningEffort:'--auto'})).error,/Unsupported reasoning option/,'unsupported options fail before launching a CLI')
+const preferenceRoutes = selected.config.providers
+assertEqual(preferenceRoutes.opencode.buildArgs('opencode/free','hello',undefined,{variant:'low'}).slice(0,3),['run','--model','opencode/free#low'],'OpenCode gets its native variant selector')
+assertEqual(preferenceRoutes.grok.buildArgs('grok-4.7','hello',undefined,{effort:'high',images:['fixture.png']}).slice(0,3),['--reasoning-effort','high','agent'],'Grok image turns retain the effort flag')
+assertEqual(preferenceRoutes.codex.buildArgs('test-codex','hello',undefined,{effort:'low',serviceTier:'priority'}).slice(0,5),['exec','-c','service_tier=\"priority\"','-c','model_reasoning_effort=\"low\"'],'Codex exec receives its separate tier and effort settings')
+
 const m=mount({providers:{opencode:{bin:process.execPath},grok:false,codex:false}})
 const cli=join(m.root,'cli.mjs')
 m.adapter.config.providers.opencode.buildArgs=(_m,p)=>[cli,p]

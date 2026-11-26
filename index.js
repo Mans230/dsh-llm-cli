@@ -120,12 +120,14 @@ function defaultRoutes() {
       defaultModel: 'opencode/deepseek-v4.1-flash-free',
       parseList: parseOpencodeList,
       parseLine: parseOpencodeLine,
-      buildArgs: (model, prompt, promptFile, execution = {}) =>
-        execution.images?.length
+      buildArgs: (model, prompt, promptFile, execution = {}) => {
+        if (execution.variant) model = `${model}#${execution.variant}`
+        return execution.images?.length
           ? ['run', '--model', model, '--format', 'json', promptFile ? `Read the full transcript at ${promptFile} and answer its last user turn.` : prompt, '--file', execution.images[0]]
           : promptFile
           ? ['run', '--model', model, '--format', 'json', 'The attached file is the full conversation transcript. Reply with your next message only, with no commentary about the file.', '--file', promptFile]
-          : ['run', '--model', model, '--format', 'json', prompt],
+          : ['run', '--model', model, '--format', 'json', prompt]
+      },
     },
     grok: {
       displayName: 'Grok (CLI)',
@@ -135,12 +137,14 @@ function defaultRoutes() {
       parseList: parseGrokList,
       parseLine: parseGrokLine,
       imageTransport: 'acp',
-      buildArgs: (model, prompt, promptFile, execution = {}) =>
-        execution.images?.length
-          ? ['agent', '-m', model, 'stdio']
+      buildArgs: (model, prompt, promptFile, execution = {}) => {
+        const effort = execution.effort ? ['--reasoning-effort', execution.effort] : []
+        return execution.images?.length
+          ? [...effort, 'agent', '-m', model, 'stdio']
           : promptFile
-          ? ['--prompt-file', promptFile, '-m', model, '--output-format', 'streaming-json']
-          : ['-p', prompt, '-m', model, '--output-format', 'streaming-json'],
+          ? [...effort, '--prompt-file', promptFile, '-m', model, '--output-format', 'streaming-json']
+          : [...effort, '-p', prompt, '-m', model, '--output-format', 'streaming-json']
+      },
     },
     codex: {
       displayName: 'Codex (CLI)',
@@ -167,6 +171,8 @@ function defaultRoutes() {
             ]
           : ['exec', '--json', '--skip-git-repo-check', '--color', 'never', '-s', execution.sandbox ?? 'read-only', '-m', model, prompt]
         args.splice(1, 0, ...(execution.images ?? []).flatMap((file) => ['--image', file]))
+        if (execution.effort) args.splice(1, 0, '-c', `model_reasoning_effort=${JSON.stringify(execution.effort)}`)
+        if (execution.serviceTier) args.splice(1, 0, '-c', `service_tier=${JSON.stringify(execution.serviceTier)}`)
         return args
       },
     },
@@ -482,7 +488,7 @@ function windowCliUsage(full, sinceMs, what = 'cli', windowDays = 0) {
  * shape its TUI picker uses). Only the entries the account marks `list` are
  * offered; hidden ones (internal reviewers) are skipped.
  */
-function readCodexModelList(file) {
+function readCodexCatalog(file) {
   const path = file ?? profilePath('.codex', 'models_cache.json')
   if (!path || !existsSync(path)) return []
   try {
@@ -496,11 +502,20 @@ function readCodexModelList(file) {
           model.slug.length > 0 &&
           (model.visibility === undefined || model.visibility === 'list'),
       )
-      .map((model) => model.slug)
   } catch {
     return []
   }
 }
+
+function readCodexModelList(file) {
+  return readCodexCatalog(file).map(model => model.slug)
+}
+
+const EFFORT_NAMES = {
+  none: 'None', minimal: 'Minimal', low: 'Low', medium: 'Medium',
+  high: 'High', xhigh: 'Extra high', max: 'Maximum', ultra: 'Ultra',
+}
+const effortName = (id) => Object.hasOwn(EFFORT_NAMES, id) ? EFFORT_NAMES[id] : id
 
 /** Collect `.jsonl` files under `dir` (bounded depth) for the Codex reader. */function collectJsonlFiles(dir, depth = 6) {
   const out = []
@@ -1536,6 +1551,7 @@ class CliAdapter {
             contextWindow: firstNumber(entry.limit?.context),
             maxOutputTokens: firstNumber(entry.limit?.output),
             name: entry.name,
+            variants: Array.isArray(entry.variants) ? entry.variants.map(variant => variant?.id) : [],
           }
         }
       }
@@ -1864,14 +1880,42 @@ class CliAdapter {
     return value
   }
 
+  async reasoningOptions(provider, model) {
+    if (provider === 'opencode') {
+      await this.loadOpencodeModelInfo()
+      const variants = this.opencodeModelInfo?.byModel[model]?.variants ?? []
+      return [...new Set(variants.filter(id => typeof id === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(id)))]
+        .map(id => ({ id, name: effortName(id), execution: { variant: id } }))
+    }
+    if (provider === 'grok') {
+      const efforts = model === 'grok-4.7' ? ['low', 'medium', 'high', 'xhigh'] : []
+      return efforts.map(id => ({ id, name: effortName(id), execution: { effort: id } }))
+    }
+    if (provider !== 'codex') return []
+    const entry = readCodexCatalog(this.config.providers.codex?.modelsCacheFile ?? this.config.codexModelsCache).find(row => row.slug === model)
+    const levels = Array.isArray(entry?.supported_reasoning_levels) ? entry.supported_reasoning_levels : []
+    const efforts = [...new Set(levels.map(item => item?.effort).filter(id => Object.hasOwn(EFFORT_NAMES, id)))]
+    const fast = (Array.isArray(entry?.additional_speed_tiers) && entry.additional_speed_tiers.includes('fast'))
+      || (Array.isArray(entry?.service_tiers) && entry.service_tiers.some(tier => tier?.id === 'priority'))
+    const options = efforts.map(id => ({ id, name: effortName(id), execution: { effort: id, ...(fast && { serviceTier: 'default' }) } }))
+    if (fast) {
+      options.unshift({ id: 'standard', name: 'Standard speed · default effort', execution: { serviceTier: 'default' } })
+      options.push({ id: 'fast', name: 'Fast · default effort (increased usage)', execution: { serviceTier: 'priority' } })
+      for (const id of efforts) options.push({ id: `fast-${id}`, name: `Fast · ${effortName(id)} (increased usage)`, execution: { effort: id, serviceTier: 'priority' } })
+    }
+    return options
+  }
+
   async resolveModel(provider, model) {
     if (provider === 'opencode') await this.loadOpencodeModelInfo()
     const route = this.config.providers[provider]
     const limits = this.limitsFor(provider, model)
+    const efforts = (await this.reasoningOptions(provider, model)).map(({ id, name }) => ({ id, name }))
     return {
       provider,
       id: model,
       name: modelEntries(route?.models).find((entry) => entry.id === model)?.name ?? model,
+      ...(efforts.length && { reasoning: { efforts } }),
       context: {
         contextWindow: limits.contextWindow ?? route?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
       },
@@ -1892,6 +1936,11 @@ class CliAdapter {
     const provider = options.provider
     const route = this.config.providers[provider]
     if (!route) throw new Error(`llm-cli: unknown provider route "${provider}"`)
+    let selection
+    if (options.reasoningEffort !== undefined) {
+      selection = (await this.reasoningOptions(provider, options.model)).find(option => option.id === options.reasoningEffort)?.execution
+      if (!selection) throw new Error('llm-cli: Unsupported reasoning option for this model. Choose an available option or the model default.')
+    }
     const turnStartedAt = Date.now()
     if (options.signal?.aborted) {
       this.recordFailure(provider, options.model, turnStartedAt, 'the request was aborted')
@@ -1972,7 +2021,7 @@ class CliAdapter {
       options.signal?.throwIfAborted()
       if (provider === 'grok' && images.length && route.imageTransport === 'acp') acpPrompt = [{ type: 'text', text: prompt }, ...imageContent]
       if (provider === 'codex' && route.appServer) codexInput = [{ type: 'text', text: prompt }, ...images.map(path => ({ type: 'localImage', path }))]
-      const args = codexInput ? (route.appServerArgs ?? ['app-server', '--listen', 'stdio://']) : route.buildArgs(options.model, prompt, promptFile, { cwd, sandbox: route.sandbox, images })
+      const args = codexInput ? (route.appServerArgs ?? ['app-server', '--listen', 'stdio://']) : route.buildArgs(options.model, prompt, promptFile, { cwd, sandbox: route.sandbox, images, ...selection })
       child = spawnCommand(route, args, {
         cwd, windowsHide: true, env: process.env,
         stdio: [acpPrompt || codexInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
@@ -2055,7 +2104,7 @@ class CliAdapter {
           } else if (packet?.id === 2) {
             codexThreadId = packet.result?.thread?.id
             if (!codexThreadId) { cliError = 'Codex returned no thread id'; child.kill() }
-            else send({ id: 3, method: 'turn/start', params: { threadId: codexThreadId, input: codexInput } })
+            else send({ id: 3, method: 'turn/start', params: { threadId: codexThreadId, input: codexInput, ...selection } })
           } else if (packet?.id === 3) {
             codexTurnId = packet.result?.turn?.id
             codexTurnStarted = !!codexTurnId
