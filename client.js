@@ -724,6 +724,7 @@ window.__ModuleLoader__.load({
           `${entry.model} hit its free usage limit on its last recorded request (${when(entry.at)}). Choose another model if it still fails.`,
         )),
         h('div', { style: S.toolbarRow }, h('div', { style: S.heading }, `CLI-recorded usage \u00b7 ${windowLabel} (the CLIs\u2019 own accounting)`), toolbar),
+        h('p', { style: S.note }, 'The date filter applies only to CLI-recorded usage.'),
         coarseScopes.length > 0
           ? h(
               'p',
@@ -865,7 +866,8 @@ window.__ModuleLoader__.load({
         h(CliModelsTable, { grok, opencode, codex }),
 
         // This harness's own ledger
-        h('div', { style: S.heading }, 'This harness (turns it recorded itself)'),
+        h('div', { style: S.heading }, 'This Harness · All time'),
+        h('p', { style: S.note }, 'Totals from turns recorded by this Harness, regardless of the selected date range.'),
         routes.length > 0
           ? h(
               'div',

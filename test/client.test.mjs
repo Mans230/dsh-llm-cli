@@ -176,6 +176,8 @@ const walk = (node, found = []) => {
 const buttonNamed = (node, label) => walk(node).find((element) => element.type === 'button' && element.children.includes(label))
 
 const html = pageOf(first)
+assert(html.includes('This Harness · All time'), 'the Harness totals explicitly say they are all time')
+assert(html.includes('The date filter applies only to CLI-recorded usage.'), 'the date filter explains its scope')
 const readiness = pageOf(loadClient({
   0: { status: 'ready', data: {
     ...payload,
