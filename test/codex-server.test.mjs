@@ -61,6 +61,15 @@ route.timeoutMs=250
 const timedOut=await drain(m.adapter,turn('codex','m'))
 assertMatch(timedOut.error,/timed out/,'app-server cannot wait forever')
 route.timeoutMs=5000
+route.firstResponseTimeoutMs=100
+const stalled=await drain(m.adapter,turn('codex','m'))
+assertMatch(stalled.error,/no response.*configured provider or gateway/i,'a silent app-server fails before the full turn deadline')
+route.firstResponseTimeoutMs=1000
+writeFileSync(stub,`import {createInterface} from 'node:readline';for await(const line of createInterface({input:process.stdin})){const p=JSON.parse(line);if(p.id===1)console.log(JSON.stringify({id:1,result:{}}));if(p.id===2)console.log(JSON.stringify({id:2,result:{thread:{id:'thread'}}}));if(p.id===3){console.log(JSON.stringify({id:3,result:{turn:{id:'turn'}}}));console.log(JSON.stringify({method:'error',params:{threadId:'thread',turnId:'turn',willRetry:false,error:{message:'connection refused'}}}))}}`)
+const refused=await drain(m.adapter,turn('codex','m'))
+assertMatch(refused.error,/connection refused/,'a terminal Codex error is surfaced without waiting for completion')
+writeFileSync(stub, `import {createInterface} from 'node:readline';for await(const line of createInterface({input:process.stdin})){const p=JSON.parse(line);if(p.id===1)console.log(JSON.stringify({id:1,result:{}}))}`)
+route.timeoutMs=5000
 const controller=new AbortController()
 const timer=setTimeout(()=>controller.abort(),250)
 const aborted=await drain(m.adapter,{...turn('codex','m'),signal:controller.signal})

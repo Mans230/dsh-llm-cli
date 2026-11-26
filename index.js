@@ -2051,9 +2051,16 @@ class CliAdapter {
       : this.config.timeoutMs
     let timedOut = false
     const timer = timeoutMs ? setTimeout(() => { timedOut = true; child.kill() }, timeoutMs) : undefined
+    const firstResponseTimeoutMs = route.firstResponseTimeoutMs ?? 45000
+    let firstResponseTimedOut = false
+    let firstResponseTimer = codexInput && Number.isFinite(firstResponseTimeoutMs)
+      && firstResponseTimeoutMs > 0 && firstResponseTimeoutMs < timeoutMs
+      ? setTimeout(() => { firstResponseTimedOut = true; child.kill() }, firstResponseTimeoutMs)
+      : undefined
 
     const finishCleanup = () => {
       clearTimeout(timer)
+      clearTimeout(firstResponseTimer)
       options.signal?.removeEventListener('abort', onAbort)
       if (child.exitCode === null) child.kill()
       removePromptDir()
@@ -2094,6 +2101,7 @@ class CliAdapter {
         if (trimmed.length === 0) continue
         stdout += `${line}\n`
         let codexParsed
+        let codexWorkStarted = false
         if (codexInput) {
           let packet
           try { packet = JSON.parse(trimmed) } catch { continue }
@@ -2111,6 +2119,10 @@ class CliAdapter {
           } else if (packet?.method === 'turn/started') {
             codexTurnId = packet.params?.turn?.id
             codexTurnStarted = !!codexTurnId
+          } else if (packet?.method === 'error' && packet.params?.willRetry === false
+            && packet.params.threadId === codexThreadId && codexTurnStarted && packet.params.turnId === codexTurnId) {
+            cliError = packet.params.error?.message ?? 'Codex reported a terminal turn error'
+            child.kill()
           } else if (packet?.method === 'turn/completed') {
             const turn = packet.params?.turn
             if (turn?.status === 'completed' && codexTurnStarted && turn.id === codexTurnId) codexCompleted = true
@@ -2120,6 +2132,9 @@ class CliAdapter {
             send({ id: packet.id, error: { code: -32601, message: 'Client request not supported; approvals are disabled' } })
           }
           codexParsed = parseCodexServerPacket(packet)
+          codexWorkStarted = packet?.method === 'item/started' && [
+            'commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'webSearch',
+          ].includes(packet.params?.item?.type)
           if (packet?.method === 'item/agentMessage/delta') codexTextItems.add(packet.params?.itemId)
           if (packet?.method === 'item/completed' && packet.params?.item?.type === 'agentMessage' && !codexTextItems.has(packet.params.item.id)) {
             codexTextItems.add(packet.params.item.id)
@@ -2147,6 +2162,10 @@ class CliAdapter {
           }
         }
         const parsed = codexInput ? codexParsed : route.parseLine ? route.parseLine(trimmed) : null
+        if (firstResponseTimer && (parsed?.text || parsed?.reasoning || parsed?.usage || codexWorkStarted)) {
+          clearTimeout(firstResponseTimer)
+          firstResponseTimer = undefined
+        }
         if (parsed?.error) cliError = String(parsed.error).slice(0, 400)
         if (parsed?.usage) {
           // A route that reports usage per agent step accumulates it. A route
@@ -2200,6 +2219,11 @@ class CliAdapter {
 
       // A killed CLI used to hand back whatever it had streamed as a finished
       // answer, so a timeout read as a short reply instead of a failure.
+      if (firstResponseTimedOut) {
+        const message = `llm-cli: "${route.displayName}" received no response after ${firstResponseTimeoutMs} ms. Check the configured provider or gateway.`
+        this.recordFailure(provider, options.model, turnStartedAt, message)
+        throw new Error(message)
+      }
       if (timedOut) {
         const message = `llm-cli: "${route.displayName}" timed out after ${timeoutMs} ms`
         this.recordFailure(provider, options.model, turnStartedAt, message)
