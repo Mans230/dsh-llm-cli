@@ -946,15 +946,16 @@ window.__ModuleLoader__.load({
 
         h('div', { style: S.heading }, 'Recent harness turns'),
         h(Table, {
-          head: ['When', 'Route', 'Model', 'In', 'Out', 'Cost', 'Time', 'Result'],
+          head: ['When', 'Route', 'Model', 'In', 'Out', 'Cost', 'First text', 'Total time', 'Result'],
           rows: (data.recent ?? []).slice(0, 12).map((entry) => [
             when(entry.at),
             entry.provider,
             entry.model,
-            counts(entry.inputTokens ?? 0),
-            counts(entry.outputTokens ?? 0),
+            Number.isFinite(entry.inputTokens) ? counts(entry.inputTokens) : '—',
+            Number.isFinite(entry.outputTokens) ? counts(entry.outputTokens) : '—',
             entry.costUsd === undefined ? '\u2014' : usd4(entry.costUsd),
-            `${((entry.ms ?? 0) / 1000).toFixed(1)}s`,
+            Number.isFinite(entry.firstTextMs) ? `${(entry.firstTextMs / 1000).toFixed(2)}s` : '—',
+            `${((entry.ms ?? 0) / 1000).toFixed(2)}s`,
             entry.ok ? 'ok' : String(entry.error ?? 'failed'),
           ]),
           empty: 'No turns recorded yet.',

@@ -40,6 +40,9 @@ for await(const chunk of m.adapter.stream(turn('codex','m'))) {
 assertEqual(textOf({chunks}),'FIRST SECOND','deltas arrive before completion without duplicate completed text')
 assertEqual(chunks.find(c=>c.type==='usage').usage.inputTokens,60,'cached input is disjoint')
 assertEqual(chunks.at(-1).reason.kind,'stop','completion succeeds even though app-server needs shutdown')
+const observed=m.adapter.ledger.summary().recent[0]
+assert(Number.isInteger(observed.firstTextMs) && observed.firstTextMs < observed.ms,'the ledger separates first visible text from total duration')
+assertEqual(observed.inputTokens,60,'reported usage is persisted')
 const quota=await m.adapter.cliUsage(7,{force:true})
 assertEqual(quota.codex.limits.primary.usedPercent,27,'live quota works without historical turns')
 assertEqual(quota.codex.limits.primary.resetsAt,2000000000000,'quota timestamps use milliseconds')

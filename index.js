@@ -1942,6 +1942,7 @@ class CliAdapter {
       if (!selection) throw new Error('llm-cli: Unsupported reasoning option for this model. Choose an available option or the model default.')
     }
     const turnStartedAt = Date.now()
+    const timingStart = performance.now()
     if (options.signal?.aborted) {
       this.recordFailure(provider, options.model, turnStartedAt, 'the request was aborted')
       yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'the request was aborted', code: 'ABORTED' } } }
@@ -2067,6 +2068,7 @@ class CliAdapter {
     }
 
     let started = false
+    let firstTextMs
     let text = ''
     let usage
     let cost
@@ -2195,6 +2197,7 @@ class CliAdapter {
             started = true
             yield { type: 'block-start', index: textIndex, blockType: 'text' }
           }
+          firstTextMs ??= Math.round(performance.now() - timingStart)
           yield { type: 'text-delta', index: textIndex, text: delta }
         }
       }
@@ -2267,6 +2270,7 @@ class CliAdapter {
         if (!started) {
           textIndex = nextIndex++
           yield { type: 'block-start', index: textIndex, blockType: 'text' }
+          firstTextMs ??= Math.round(performance.now() - timingStart)
           yield { type: 'text-delta', index: textIndex, text }
         }
         yield { type: 'block-end', index: textIndex, block: { type: 'text', text } }
@@ -2277,12 +2281,13 @@ class CliAdapter {
       if (usage) yield { type: 'usage', usage }
       this.ledger?.record({
         at: turnStartedAt,
-        ms: Date.now() - turnStartedAt,
+        ms: Math.round(performance.now() - timingStart),
+        firstTextMs,
         provider,
         model: options.model,
-        inputTokens: usage?.inputTokens ?? 0,
-        outputTokens: usage?.outputTokens ?? 0,
-        cacheReadTokens: usage?.cacheReadTokens ?? 0,
+        inputTokens: usage?.inputTokens,
+        outputTokens: usage?.outputTokens,
+        cacheReadTokens: usage?.cacheReadTokens,
         costUsd: cost,
         ok: true,
       })
@@ -3365,10 +3370,11 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans, 
         stamp(entry.at),
         escapeHtml(entry.provider),
         escapeHtml(entry.model),
-        compact(entry.inputTokens ?? 0),
-        compact(entry.outputTokens ?? 0),
+        Number.isFinite(entry.inputTokens) ? compact(entry.inputTokens) : '—',
+        Number.isFinite(entry.outputTokens) ? compact(entry.outputTokens) : '—',
         entry.costUsd === undefined ? '—' : `$${entry.costUsd.toFixed(4)}`,
-        `${((entry.ms ?? 0) / 1000).toFixed(1)}s`,
+        Number.isFinite(entry.firstTextMs) ? `${(entry.firstTextMs / 1000).toFixed(2)}s` : '—',
+        `${((entry.ms ?? 0) / 1000).toFixed(2)}s`,
         entry.ok ? '<span class="ok">ok</span>' : `<span class="bad">${escapeHtml(entry.error ?? 'failed')}</span>`,
       ]),
     )
@@ -3667,8 +3673,8 @@ ${notice ? `<p class="note">${escapeHtml(notice)}</p>` : ''}
 </table></div>
 <h2>Recent turns</h2>
 <div class="wrap"><table>
-<thead><tr><th>When</th><th>Provider</th><th>Model</th><th>In</th><th>Out</th><th>Cost</th><th>Time</th><th>Result</th></tr></thead>
-<tbody>${recentRows || '<tr><td colspan="8">No turns recorded yet.</td></tr>'}</tbody>
+<thead><tr><th>When</th><th>Provider</th><th>Model</th><th>In</th><th>Out</th><th>Cost</th><th>First text</th><th>Total time</th><th>Result</th></tr></thead>
+<tbody>${recentRows || '<tr><td colspan="9">No turns recorded yet.</td></tr>'}</tbody>
 </table></div>
 <footer>Ledger: <code>${escapeHtml(summary.ledgerFile ?? 'in memory only')}</code> · rendered ${escapeHtml(stamp(generatedAt))}</footer>
 ${
