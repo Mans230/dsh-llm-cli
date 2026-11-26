@@ -3103,13 +3103,14 @@ function authorizeDashboard(request, token) {
   if (typeof token !== 'string' || token.length < MIN_DASHBOARD_TOKEN) {
     return {
       ok: false,
+      code: 'dashboard-token-unconfigured',
       reason: `remote dashboard access needs a dashboardToken of ${MIN_DASHBOARD_TOKEN}+ characters in the plugin config`,
     }
   }
   const given = Buffer.from(tokenFromRequest(request))
   const expected = Buffer.from(token)
   if (given.length !== expected.length || !timingSafeEqual(given, expected)) {
-    return { ok: false, reason: 'a valid dashboard token is required, as ?token=, an x-llm-cli-token header, or the llm_cli_token cookie' }
+    return { ok: false, code: 'dashboard-token-required', reason: 'a valid dashboard token is required, as ?token=, an x-llm-cli-token header, or the llm_cli_token cookie' }
   }
   let fromQuery = false
   try {
@@ -3117,11 +3118,13 @@ function authorizeDashboard(request, token) {
   } catch {
     fromQuery = false
   }
+  const header = request?.headers?.['x-llm-cli-token']
+  const remember = typeof header === 'string' && header.length > 0 && request.headers['x-llm-cli-remember'] === '1'
   return {
     ok: true,
-    // Remember a token that arrived in the URL so the page's own links work.
-    setCookie: fromQuery
-      ? `llm_cli_token=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/llm-cli`
+    // Keep legacy URL bootstrap working; the inline form only remembers over HTTPS.
+    setCookie: fromQuery || remember
+      ? `llm_cli_token=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/llm-cli${remember ? '; Secure' : ''}`
       : undefined,
   }
 }
@@ -3881,7 +3884,7 @@ export function apply(ctx, config) {
     const guard = (handler) => async (request, response) => {
       const auth = authorizeDashboard(request, normalized.dashboardToken)
       if (!auth.ok) {
-        response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+        response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-llm-cli-dashboard-error': auth.code })
         response.end(`llm-cli: ${auth.reason}\n`)
         return
       }

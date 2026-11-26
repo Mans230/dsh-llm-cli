@@ -87,6 +87,7 @@ const openJson = open.webRoutes.find((route) => route.path === '/llm-cli/usage.j
 const openRemote = await call(openJson, fakeRequest('/llm-cli/usage.json', { address: '192.168.1.20' }))
 assertEqual(openRemote.status, 403, 'remote access is refused when no token is configured')
 assertMatch(openRemote.body, /dashboardToken/, 'that refusal names the config key')
+assertEqual(openRemote.headers['x-llm-cli-dashboard-error'], 'dashboard-token-unconfigured', 'the client can distinguish missing server configuration')
 assertEqual((await call(openJson, fakeRequest('/llm-cli/usage.json'))).status, 200, 'loopback still works with no token configured')
 
 const wrong = await call(json, fakeRequest('/llm-cli/usage.json?token=nope-nope-nope-nope', { address: '192.168.1.20' }))
@@ -96,6 +97,15 @@ assertEqual(wrong.status, 403, 'a remote request with a wrong token is refused')
 const viaHeader = await call(json, fakeRequest('/llm-cli/usage.json', { address: '192.168.1.20', headers: { 'x-llm-cli-token': TOKEN } }))
 assertEqual(viaHeader.status, 200, 'a token in the header is accepted')
 assert(JSON.parse(viaHeader.body).routes, 'the json payload is served')
+assertEqual(remote.headers['x-llm-cli-dashboard-error'], 'dashboard-token-required', 'the client can offer inline authentication')
+assert(!viaHeader.written['set-cookie'], 'API callers do not get a cookie by default')
+const inlineHeaders = { 'x-llm-cli-token': TOKEN, 'x-llm-cli-remember': '1' }
+const inline = await call(json, fakeRequest('/llm-cli/usage.json', { address: '192.168.1.20', headers: inlineHeaders }))
+assertEqual(inline.status, 200, 'inline sign-in returns usage on the same request')
+assertMatch(inline.written['set-cookie'], /llm_cli_token=.*; HttpOnly; SameSite=Strict; Path=\/llm-cli; Secure$/, 'inline sign-in remembers access over HTTPS')
+const badInline = await call(json, fakeRequest('/llm-cli/usage.json', { address: '192.168.1.20', headers: { ...inlineHeaders, 'x-llm-cli-token': 'invalid' } }))
+assertEqual(badInline.status, 403, 'an invalid inline token is refused')
+assert(!badInline.written['set-cookie'], 'an invalid token is never remembered')
 
 const viaQuery = await call(json, fakeRequest(`/llm-cli/usage.json?token=${TOKEN}`, { address: '192.168.1.20' }))
 assertEqual(viaQuery.status, 200, 'a token in the query is accepted')

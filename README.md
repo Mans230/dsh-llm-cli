@@ -207,9 +207,11 @@ The bundle mounts the entry with defaults; a profile patch overrides it by `id`:
 - `/llm-cli/usage` (HTML) and `/llm-cli/usage.json` (JSON) on the harness's own
   web server, backed by the ledger and the CLIs' own usage. A `?days=`/`?hours=`
   query (or the on-page 5h/7d/30d/90d/all buttons) scopes the charts to a
-  trailing window. The two endpoints answer this machine only; another host
-  needs `dashboardToken`, presented as `?token=`, an `x-llm-cli-token` header,
-  or the `llm_cli_token` cookie the page sets from a query token.
+  trailing window. Direct loopback can read both endpoints; remote requests
+  need `dashboardToken`, presented as `?token=`, an `x-llm-cli-token` header,
+  or the `llm_cli_token` cookie. On HTTPS, enter the token in **Settings →
+  LLM usage** to unlock the charts in place. The browser remembers access for
+  the session without putting the token in the URL.
 - The plugin's page in **two places** in the Web client, both rendering the same
   charted dashboard:
   - **Plugins → Grok + Codex + OpenCode (CLI)** (`client.js`, slot

@@ -424,6 +424,7 @@ window.__ModuleLoader__.load({
       const forceNext = React.useRef(false)
       const [setup, setSetup] = React.useState(null)
       const [auth, setAuth] = React.useState({})
+      const dashboardToken = React.useRef('')
       React.useEffect(() => {
         if (props?.view === 'summary') return
         let live = true
@@ -491,14 +492,25 @@ window.__ModuleLoader__.load({
       }
 
       React.useEffect(() => {
+        if (props?.view === 'summary') return
         let live = true
         setState((current) => (current.status === 'ready' ? { ...current, refreshing: true } : { status: 'loading' }))
         const query = days > 0 ? `?days=${days}` : '?days=all'
         const force = forceNext.current
         forceNext.current = false
-        fetch(`/llm-cli/usage.json${query}${force ? '&force=1' : ''}`, { headers: { accept: 'application/json' } })
+        const headers = { accept: 'application/json' }
+        if (dashboardToken.current) {
+          headers['x-llm-cli-token'] = dashboardToken.current
+          headers['x-llm-cli-remember'] = '1'
+          dashboardToken.current = ''
+        }
+        fetch(`/llm-cli/usage.json${query}${force ? '&force=1' : ''}`, { headers })
           .then((response) => {
-            if (!response.ok) throw new Error(`HTTP ${response.status}`)
+            if (!response.ok) {
+              const error = new Error(`HTTP ${response.status}`)
+              if (response.status === 403) error.code = response.headers.get('x-llm-cli-dashboard-error')
+              throw error
+            }
             return response.json()
           })
           .then((data) => {
@@ -517,19 +529,20 @@ window.__ModuleLoader__.load({
             }
           })
           .catch((error) => {
-            if (live) setState({ status: 'error', error: String((error && error.message) || error) })
+            if (live) setState({ status: 'error', code: error?.code, error: String((error && error.message) || error) })
           })
         return () => {
           live = false
         }
-      }, [tick, days])
+      }, [tick, days, props?.view])
 
       // Auto-refresh keeps the charts live while the panel is open.
+      const needsDashboardAccess = state.code === 'dashboard-token-required' || state.code === 'dashboard-token-unconfigured'
       React.useEffect(() => {
-        if (!auto || props?.view === 'summary') return undefined
+        if (!auto || needsDashboardAccess || props?.view === 'summary') return undefined
         const id = setInterval(() => setTick((value) => value + 1), 30000)
         return () => clearInterval(id)
-      }, [auto, props?.view])
+      }, [auto, needsDashboardAccess, props?.view])
 
       // The card in the list shows one line; the page shows everything.
       if (props && props.view === 'summary') {
@@ -543,6 +556,32 @@ window.__ModuleLoader__.load({
       if (state.status === 'loading') return h('p', { style: S.lead }, 'Reading /llm-cli/usage.json\u2026')
 
       if (state.status === 'error') {
+        if (state.code === 'dashboard-token-unconfigured') {
+          return h('div', null,
+            h('p', { style: S.lead }, 'Remote usage access has not been set up.'),
+            h('p', { style: S.note }, 'Ask the server admin to set dashboardToken in the llm-cli profile configuration and restart the Harness.'),
+            h('button', { type: 'button', style: S.button, onClick: () => setTick(value => value + 1) }, 'Retry'),
+          )
+        }
+        if (state.code === 'dashboard-token-required') {
+          return h('form', {
+            onSubmit: (event) => {
+              event.preventDefault()
+              const input = event.currentTarget.elements.dashboardToken
+              const token = input.value.trim()
+              if (!token) return
+              input.value = ''
+              dashboardToken.current = token
+              setTick(value => value + 1)
+            },
+          },
+          h('p', { style: S.lead }, 'Unlock usage dashboard'),
+          h('label', { style: S.note }, 'Enter a valid dashboard token ',
+            h('input', { type: 'password', name: 'dashboardToken', required: true, autoComplete: 'off' }),
+          ),
+          ' ',
+          h('button', { type: 'submit', style: S.button }, 'Open dashboard'))
+        }
         return h(
           'div',
           null,
