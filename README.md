@@ -191,10 +191,15 @@ for the Harness UI and dashboard.
    When Harness passes the owner session to the plugin, no separate dashboard
    token is needed in any profile. Normal Harness sign-in still applies.
 
-This was verified with Harness `0.2.3-alpha.2` and two separate profiles
-behind nginx. Harness `0.2.1-rc.5` doesn't pass the owner session to plugin
-routes. On that version, updating only the plugin still leaves the dashboard
-returning `403` through nginx. Upgrade Harness as well, or configure
+This was verified on Linux with nginx and Harness `0.2.3-alpha.2` in separate
+Docker containers. In two fresh profiles, normal owner sign-in was enough
+for both dashboard endpoints to return `200` without a `dashboardToken`.
+Anonymous usage requests returned `401`, and remote setup and applying updates
+still returned `403`.
+
+Harness `0.2.1-rc.5` doesn't pass the owner session to plugin routes. In a
+separate nginx test on Windows, that version returned the dashboard-token
+`403` even with the latest plugin. Upgrade Harness as well, or configure
 `dashboardToken` in each affected profile as a fallback.
 
 ## Troubleshooting
