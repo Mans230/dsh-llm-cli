@@ -8,6 +8,12 @@ All notable changes to this plugin are documented here. The format follows
 
 ### Fixed
 
+- Resolve the hosted JSX runtime and React DOM from Harness alongside React;
+  cover React 18.3.1 and React 19 hosts in Chromium and CI.
+- Keep Codex context-full markers out of measured usage, isolate approximate
+  histories per rollout, and reconcile model/session details with each selected
+  time window.
+
 - Treat tunnel and proxy requests as remote so a loopback upstream socket
   cannot bypass dashboard authentication or expose setup/update action tokens.
 - Refuse malformed dashboard cookies without throwing.
@@ -18,6 +24,14 @@ All notable changes to this plugin are documented here. The format follows
 - Correct the dashboard explanation of OpenCode model-limit discovery.
 
 ### Added
+
+- Redesign both usage dashboards with shared coss ui/Base UI components,
+  Recharts, responsive light/dark layouts, CLI and model drill-down, model
+  search, metric selection, and 5h/7h/24h/7d/30d/90d/lifetime ranges.
+- Add timestamped Codex usage deltas for accurate short-range and per-model
+  history, with explicit session and whole-day scope notes for coarse sources.
+- Bundle frontend assets locally and retain setup, sign-in, update actions,
+  quota freshness, budgets, and an HTML fallback without a CDN dependency.
 
 - Stream Codex replies through app-server delta notifications and read live
   account quota, with explicit recorded-file fallback when unavailable.

@@ -155,6 +155,15 @@ assert(withTurns.body.includes('<span class="ok">ok</span>'), 'a finished turn i
 assert(withTurns.body.includes('<span class="bad">rate &lt;limited&gt;</span>'), 'a failed turn is marked and its error escaped')
 assert(withTurns.body.includes('<th>Turns</th>'), 'a table that counts turns says "turns", not "steps"')
 
+// The enhanced page embeds JSON as data, so model/error text cannot terminate
+// its script tag and turn into executable markup.
+const hostileModel = '</script><script>window.injected=true</script>'
+adapter.ledger.record({ at: Date.now(), provider: 'grok', model: hostileModel, inputTokens: 1, outputTokens: 1, ok: true })
+const escapedPage = await call(html, fakeRequest('/llm-cli/usage?refresh=off'))
+const embedded = escapedPage.body.match(/<script id="du-payload" type="application\/json">([\s\S]*?)<\/script>/)?.[1]
+assert(embedded && !embedded.includes('<'), 'embedded usage JSON escapes HTML delimiters')
+assert(JSON.parse(embedded).recent.some(row => row.model === hostileModel), 'escaping preserves the original model text as data')
+
 rmSync(root, { recursive: true, force: true })
 rmSync(open.root, { recursive: true, force: true })
 rmSync(weak.root, { recursive: true, force: true })

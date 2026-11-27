@@ -406,6 +406,10 @@ function readGrokCliUsage(dir) {
     totalTokens: mix.total,
     mix,
     sessions,
+    // Grok's persisted model totals are session aggregates. Their placement is
+    // explicitly identified as session last activity, never exact turn timing.
+    timeline: sessions.flatMap(session => session.models.map(model => ({ at: session.endedAt, model: model.id, ...model }))),
+    timelinePrecision: 'session',
     sessionCount,
     models,
     daily,
@@ -436,11 +440,38 @@ function windowGrokUsage(full, sinceMs, windowDays = 0) {
  */
 function windowCliUsage(full, sinceMs, what = 'cli', windowDays = 0) {
   if (!full || !(sinceMs > 0)) return full
+  if (full.timelineAttribution === 'per-session') {
+    const timeline = full.timeline.filter(event => event.at >= sinceMs)
+    const { totals, models, daily } = summarizeCodexEvents(timeline)
+    const bySession = new Map()
+    for (const event of timeline) {
+      const events = bySession.get(event.sessionId) ?? []
+      events.push(event)
+      bySession.set(event.sessionId, events)
+    }
+    const sessions = full.sessions.flatMap(session => {
+      const events = bySession.get(session.id)
+      if (!events?.length) return []
+      const scoped = summarizeCodexEvents(events)
+      return [{ ...session, ...scoped.totals, models: scoped.models }]
+    })
+    return {
+      ...full, ...totals, models, daily, timeline, sessions,
+      mix: tokenMix(totals, { cacheInInput: true }),
+      timelinePrecision: codexTimelinePrecision(timeline),
+      available: sessions.length > 0,
+      sessionCount: sessions.length,
+      totalSessions: full.sessionCount ?? 0,
+      note: sessions.length ? '' : full.available === false && full.note ? full.note : `no ${what} sessions in the ${windowLabelFor(windowDays)}`,
+    }
+  }
   const cutoffDate = new Date(sinceMs).toISOString().slice(0, 10)
   const sessions = (full.sessions ?? []).filter((session) => (session.endedAt ?? 0) >= sinceMs)
   const totals = blankUsage()
   const byModel = new Map()
-  for (const session of sessions) {
+  const timeline = (full.timeline ?? []).filter(event => event.at >= sinceMs)
+  const exact = full.timelinePrecision === 'event'
+  for (const session of exact ? [] : sessions) {
     addUsage(totals, session)
     for (const model of session.models ?? []) {
       const row = byModel.get(model.id) ?? { id: model.id, ...blankUsage() }
@@ -448,7 +479,18 @@ function windowCliUsage(full, sinceMs, what = 'cli', windowDays = 0) {
       byModel.set(model.id, row)
     }
   }
-  const daily = (full.daily ?? []).filter((day) => day.date >= cutoffDate)
+  const byDay = new Map()
+  if (exact) for (const event of timeline) {
+    addUsage(totals, event)
+    const model = byModel.get(event.model) ?? { id: event.model, ...blankUsage() }
+    addUsage(model, event)
+    byModel.set(event.model, model)
+    const date = new Date(event.at).toISOString().slice(0, 10)
+    const day = byDay.get(date) ?? { date, ...blankUsage() }
+    addUsage(day, event)
+    byDay.set(date, day)
+  }
+  const daily = exact ? [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date)) : (full.daily ?? []).filter((day) => day.date >= cutoffDate)
   const models = [...byModel.values()].sort((left, right) => right.totalTokens - left.totalTokens)
   // Both windowed views embed cache reads in input, and a window must not keep
   // the unwindowed mix from `full`.
@@ -464,6 +506,7 @@ function windowCliUsage(full, sinceMs, what = 'cli', windowDays = 0) {
     totalSessions: full.sessionCount ?? 0,
     models,
     daily,
+    timeline,
     // A CLI that could not answer at all keeps its own reason. Otherwise the
     // note names the window, and the window is the one the caller asked for, so
     // it cannot drift into a value like "7.0000183 days".
@@ -474,6 +517,30 @@ function windowCliUsage(full, sinceMs, what = 'cli', windowDays = 0) {
           : `no ${what} sessions in the ${windowLabelFor(windowDays)}`
         : '',
   }
+}
+
+/** One attribution source for CLI totals, per-model rows and session details. */
+function summarizeCodexEvents(events) {
+  const totals = blankUsage()
+  const byModel = new Map()
+  const byDay = new Map()
+  for (const event of events) {
+    addUsage(totals, event)
+    const model = byModel.get(event.model) ?? { id: event.model, ...blankUsage() }
+    addUsage(model, event)
+    byModel.set(event.model, model)
+    if (!(event.at > 0)) continue
+    const date = new Date(event.at).toISOString().slice(0, 10)
+    const day = byDay.get(date) ?? { date, ...blankUsage() }
+    addUsage(day, event)
+    byDay.set(date, day)
+  }
+  return { totals, models: [...byModel.values()].sort((a, b) => b.totalTokens - a.totalTokens), daily: [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date)) }
+}
+
+function codexTimelinePrecision(events) {
+  const approximate = events.filter(event => event.precision === 'session').length
+  return approximate === 0 ? 'event' : approximate === events.length ? 'session' : 'mixed'
 }
 
 /**
@@ -574,7 +641,9 @@ function parseRollout(file) {
   } catch {
     return null
   }
-  const value = { sessionId: '', model: '', endedAt: 0, sessionTotals: null, rate: null, rateAt: 0, contextWindow: undefined, days: [] }
+  const value = { sessionId: '', model: '', endedAt: 0, sessionTotals: null, rate: null, rateAt: 0, contextWindow: undefined, days: [], timeline: [] }
+  let previous = blankUsage()
+  const accounted = blankUsage()
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim()
     if (trimmed.length === 0 || trimmed[0] !== '{') continue
@@ -595,11 +664,33 @@ function parseRollout(file) {
     } else if (event?.type === 'event_msg' && payload?.type === 'token_count') {
       const info = payload.info
       const cumulative = info?.total_token_usage
-      if (cumulative && typeof cumulative === 'object') value.sessionTotals = codexUsage(cumulative)
+      // Codex fill_to_context_window reports context occupancy in total_tokens
+      // while zeroing all component counters. Keep the usage already measured;
+      // reset only the delta baseline for subsequent component-counter usage.
+      const contextFill = cumulative && toCount(cumulative.total_tokens) > 0 &&
+        ['input_tokens', 'output_tokens', 'cached_input_tokens', 'reasoning_output_tokens', 'cache_write_input_tokens'].every(key => toCount(cumulative[key]) === 0)
+      if (cumulative && typeof cumulative === 'object') {
+        if (contextFill) previous = blankUsage()
+        else {
+          const current = codexUsage(cumulative)
+          // Context occupancy may remain in total_tokens after a fill marker.
+          // Billable usage is derived solely from its measured components.
+          current.totalTokens = tokenMix(current, { cacheInInput: true }).total
+          const reset = ['inputTokens', 'outputTokens'].some(key => current[key] < previous[key])
+          const baseline = reset ? blankUsage() : previous
+          const delta = Object.fromEntries(USAGE_FIELDS.map(field => [field, Math.max(0, (current[field] ?? 0) - (baseline[field] ?? 0))]))
+          delta.totalTokens = tokenMix(delta, { cacheInInput: true }).total
+          delta.turns = delta.totalTokens > 0 ? 1 : 0
+          addUsage(accounted, delta)
+          if (at > 0 && delta.totalTokens > 0) value.timeline.push({ at, model: value.model || 'codex', ...delta })
+          previous = current
+          value.sessionTotals = { ...accounted }
+        }
+      }
       const contextWindow = firstNumber(info?.model_context_window, info?.modelContextWindow)
       if (contextWindow !== undefined) value.contextWindow = contextWindow
       const perTurn = info?.last_token_usage
-      if (perTurn && typeof perTurn === 'object') {
+      if (!contextFill && perTurn && typeof perTurn === 'object') {
         value.days.push({ date: new Date(at || Date.now()).toISOString().slice(0, 10), usage: codexUsage(perTurn) })
       }
       if (payload.rate_limits && typeof payload.rate_limits === 'object') {
@@ -644,25 +735,16 @@ function readCodexCliUsage(dir) {
   }
   if (files.length === 0) return { ...empty, note: 'no codex session rollouts recorded yet' }
 
-  const totals = blankUsage()
-  const byModel = new Map()
-  const byDay = new Map()
   const sessions = []
   let bestLimitsAt = 0
   let limits = { primary: null, secondary: null }
   const limitsObservedAt = { primary: null, secondary: null }
   let lastContextWindow
+  const timeline = []
 
   for (const file of files) {
     const parsed = parseRollout(file)
     if (!parsed) continue
-    // Per-day rows count even when the rollout has no cumulative usage block.
-    for (const day of parsed.days) {
-      const row = byDay.get(day.date) ?? { date: day.date, ...blankUsage() }
-      addUsage(row, day.usage)
-      row.turns += 1
-      byDay.set(day.date, row)
-    }
     if (parsed.contextWindow !== undefined) lastContextWindow = parsed.contextWindow
     const { sessionId, model, endedAt, sessionTotals, rate, rateAt } = parsed
     // Quota-only events are useful even before a session records token totals.
@@ -677,27 +759,27 @@ function readCodexCliUsage(dir) {
       }
     }
     if (!sessionTotals) continue
-    addUsage(totals, sessionTotals)
-    totals.turns += 1
-    const modelId = model || 'codex'
-    const modelRow = byModel.get(modelId) ?? { id: modelId, ...blankUsage() }
-    addUsage(modelRow, sessionTotals)
-    modelRow.turns += 1
-    byModel.set(modelId, modelRow)
+    const id = sessionId || basename(file)
+    const recorded = summarizeCodexEvents(parsed.timeline)
+    // An incomplete timestamp history affects only this rollout. Never replace
+    // another session's exact event history with its last-activity aggregate.
+    const exact = USAGE_FIELDS.every(key => (recorded.totals[key] ?? 0) === (sessionTotals[key] ?? 0))
+    const events = (exact ? parsed.timeline : [{ at: endedAt, model: model || 'codex', ...sessionTotals }])
+      .map(event => ({ ...event, sessionId: id, precision: exact ? 'event' : 'session' }))
+    timeline.push(...events)
+    const scoped = summarizeCodexEvents(events)
     sessions.push({
-      id: sessionId || basename(file),
-      endedAt,
-      model: modelId,
-      models: [{ id: modelId, ...sessionTotals, turns: 1 }],
-      ...sessionTotals,
-      turns: 1,
+      id, endedAt,
+      // The final active model is metadata, not the owner of the session total.
+      model: model || 'codex',
+      models: scoped.models,
+      ...scoped.totals,
+      timelinePrecision: exact ? 'event' : 'session',
     })
   }
 
   sessions.sort((left, right) => right.endedAt - left.endedAt)
-  const models = [...byModel.values()].sort((left, right) => right.totalTokens - left.totalTokens)
-  const daily = [...byDay.values()].sort((left, right) => (left.date < right.date ? -1 : 1))
-  // Codex counts cached input inside input_tokens.
+  const { totals, models, daily } = summarizeCodexEvents(timeline)
   const mix = tokenMix(totals, { cacheInInput: true })
   return {
     ...empty,
@@ -709,6 +791,9 @@ function readCodexCliUsage(dir) {
     sessionCount: sessions.length,
     models,
     daily,
+    timeline: timeline.sort((a, b) => a.at - b.at),
+    timelineAttribution: 'per-session',
+    timelinePrecision: codexTimelinePrecision(timeline),
     limits,
     limitsObservedAt,
     limitsStale: Object.fromEntries(['primary', 'secondary'].map((key) => [key,
@@ -3358,8 +3443,20 @@ function gaugeHtml(percent, label) {
   return `<div class="gauge"><div class="gauge-fill" style="width:${(clamped * 100).toFixed(1)}%;background:${tone}"></div></div><div class="gauge-label">${escapeHtml(label)}</div>`
 }
 
-/** The self-contained usage dashboard page, rendered server-side. */
+let dashboardAssets
+function readDashboardAssets() {
+  if (!dashboardAssets) dashboardAssets = {
+    css: readFileSync(new URL('./dist/dashboard.css', import.meta.url), 'utf8'),
+    script: readFileSync(new URL('./dist/standalone.js', import.meta.url), 'utf8'),
+  }
+  return dashboardAssets
+}
+
+/** The self-contained usage dashboard page, with a shared React view and HTML fallback. */
 function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans, options = {}) {
+  const assets = readDashboardAssets()
+  const dashboardPayload = JSON.stringify({ ...summary, generatedAt, routes, limitsNotice: notice, cliUsage, plans, windowDays: cliUsage?.windowDays ?? 0 })
+    .replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029')
   const row = (cells) => `<tr>${cells.map((cell) => `<td>${cell}</td>`).join('')}</tr>`
   const autoRefresh = options.autoRefresh !== false
   const providerRows = summary.providers
@@ -3624,6 +3721,8 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans, 
     : windowLink(`days=${windowDaysShown || 'all'}&refresh=on`, 'resume auto-refresh')
   const windowLinks = [
     windowLink('hours=5', '5h'),
+    windowLink('hours=7', '7h'),
+    windowLink('hours=24', '24h'),
     windowLink('days=7', '7d'),
     windowLink('days=30', '30d'),
     windowLink('days=90', '90d'),
@@ -3665,8 +3764,22 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans, 
   .btn { font: inherit; font-size: 12px; padding: 4px 12px; border-radius: 7px; border: 1px solid #2a3140; background: #1b202a; color: inherit; cursor: pointer; }
   .log { background: #12151c; border: 1px solid #232833; border-radius: 8px; padding: 8px; font-size: 11px; max-height: 200px; overflow: auto; white-space: pre-wrap; }
 </style>
+<style>${assets.css.replace(/<\/style/gi, '<\\/style')}</style>
+<style>
+  :root { color-scheme: light dark; }
+  body { background: light-dark(#fafafa,#111); color: light-dark(#202124,#ededed); max-width: 1328px; margin: auto; padding: 28px 32px; }
+  .du-static-management { margin-top: 24px; border-top: 1px solid light-dark(#e5e5e8,#323234); padding-top: 16px; }
+  .du-static-management > summary { cursor: pointer; font-size: 13px; color: light-dark(#686b73,#a0a0a6); }
+  .du-static-management :is(.card,.chart,table,code,.log) { background: light-dark(#fff,#171717); border-color: light-dark(#e5e5e8,#323234); color: inherit; box-shadow: none; }
+  .du-static-management :is(h2,.k,.sub,.note,footer,th,.gauge-label) { color: light-dark(#686b73,#a0a0a6); }
+  .du-static-management th { text-transform: none; letter-spacing: normal; }
+  .du-static-management h2 { font-size: 14px; }
+  @media(max-width:600px) { body { padding: 16px; } }
+</style>
 </head>
 <body>
+<div id="du-root" class="dsh-dashboard"></div>
+<details class="du-static-management" open><summary>Host management &amp; retained records</summary>
 <h1>CLI provider usage</h1>
 <div class="sub">OpenCode, Grok and Codex CLI usage · ${windowLabel}${opencodeCli?.available && opencodeCli.scopeDays > 0 && opencodeCli.scopeDays > windowDaysShown ? ` (opencode covers ${opencodeCli.scopeDays}d, whole days only)` : ''} · window ${windowLinks} · ${autoRefresh ? 'refreshes every 20s and keeps your place' : 'auto-refresh is off'} · ${refreshLink} · <a href="/llm-cli/usage.json?days=${windowDaysShown || 'all'}" style="color:#6fb3ff">JSON</a></div>
 <p class="note">The date filter applies only to CLI-recorded usage.</p>
@@ -3703,6 +3816,7 @@ ${notice ? `<p class="note">${escapeHtml(notice)}</p>` : ''}
 <tbody>${recentRows || '<tr><td colspan="9">No turns recorded yet.</td></tr>'}</tbody>
 </table></div>
 <footer>Ledger: <code>${escapeHtml(summary.ledgerFile ?? 'in memory only')}</code> · rendered ${escapeHtml(stamp(generatedAt))}</footer>
+</details>
 ${
   autoRefresh
     ? `<script>
@@ -3713,7 +3827,8 @@ ${
       window.scrollTo(0, Number(saved) || 0)
       sessionStorage.removeItem(key)
     }
-    setTimeout(() => {
+    window.__duFallbackTimer = setTimeout(() => {
+      if (document.documentElement.classList.contains('du-enhanced')) return
       sessionStorage.setItem(key, String(window.scrollY))
       location.reload()
     }, 20000)
@@ -3721,6 +3836,8 @@ ${
 </script>`
     : ''
 }
+<script id="du-payload" type="application/json">${dashboardPayload}</script>
+<script>${assets.script.replace(/<\/script/gi, '<\\/script')}</script>
 </body>
 </html>
 `

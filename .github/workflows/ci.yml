@@ -18,11 +18,31 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node-version }}
-      # No dependencies: the plugin only imports Node built-ins, and the tests
-      # drive stub CLIs, so nothing needs installing and nothing hits the network.
+      # The published plugin bundles its UI; contributors install the frontend
+      # toolchain here. Harness-only peers are supplied by DSH at runtime.
+      - name: Install frontend toolchain
+        run: npm ci --legacy-peer-deps
+      - name: Build shared dashboards
+        run: npm run build
       - name: Syntax check
         run: |
           node --check index.js
           node --check client.js
       - name: Test
         run: npm test
+
+  browser:
+    name: browser (React 18 and 19)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22.x'
+      - run: npm ci --legacy-peer-deps
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - name: Test standalone and both Harness runtimes
+        run: npm run test:ui
+        env:
+          DSH_BROWSER_CHANNEL: chromium
