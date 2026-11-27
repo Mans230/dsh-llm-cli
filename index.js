@@ -1126,7 +1126,7 @@ function parseOpencodeLine(line) {
     const message = event?.error?.message ?? event?.message ?? (typeof event?.error === 'string' ? event.error : undefined)
     const status = firstNumber(event?.error?.status, event?.status)
     if (typeof message === 'string' && message.length > 0) {
-      return { error: status !== undefined ? `${message} (HTTP ${status})` : message }
+      return { error: status !== undefined ? `${message} (HTTP ${status})` : message, retryAfterMs: event.error?.retryAfterMs }
     }
   }
   if (event?.type === 'text' && typeof event.part?.text === 'string' && event.part.text.length > 0) {
@@ -1172,7 +1172,7 @@ function parseGrokLine(line) {
     const message = event?.message ?? event?.error?.message ?? (typeof event?.error === 'string' ? event.error : undefined)
     const status = firstNumber(event?.status, event?.error?.status)
     if (typeof message === 'string' && message.length > 0) {
-      return { error: status !== undefined ? `${message} (HTTP ${status})` : message }
+      return { error: status !== undefined ? `${message} (HTTP ${status})` : message, retryAfterMs: event.error?.retryAfterMs ?? event.retryAfterMs }
     }
   }
   if (event?.type === 'result' && (event?.subtype === 'error' || event?.is_error === true)) {
@@ -1503,6 +1503,23 @@ function resolveBin(candidates) {
   return list.pop()
 }
 
+function classifyFailure(message) {
+  if (/free usage limit|weekly limit|insufficient.quota|quota exhausted/i.test(message)) return 'quota'
+  if (/not signed in|unauthenticated|unauthorized|HTTP 401/i.test(message)) return 'sign-in'
+  if (/subscription|billing|payment|insufficient (credit|balance)|HTTP 402|HTTP 403/i.test(message)) return 'account-access'
+  if (/rate limit|too many requests|HTTP 429/i.test(message)) return 'rate-limit'
+  if (/connection refused|actively refused|ECONNREFUSED|upstream request failed|HTTP 50[0234]/i.test(message)) return 'upstream'
+  if (/timed out|received no response/i.test(message)) return 'timeout'
+}
+
+const FAILURE_HINTS = {
+  quota: 'Switch models or wait for quota to reset.',
+  'sign-in': 'Check the CLI sign-in on the Harness host.',
+  'account-access': 'Check model access and the provider plan for this account.',
+  'rate-limit': 'Wait before trying again, or choose another model.',
+  upstream: 'Check the provider or gateway connection before retrying.',
+}
+
 /** One CLI-backed adapter serving every configured route. */
 class CliAdapter {
   constructor(ctx, config, signIn, ledger) {
@@ -1518,7 +1535,7 @@ class CliAdapter {
   }
 
   /** Record a failed turn so the dashboard shows it beside the successful ones. */
-  recordFailure(provider, model, startedAt, message) {
+  recordFailure(provider, model, startedAt, message, retryAt) {
     this.ledger?.record({
       at: startedAt,
       ms: Date.now() - startedAt,
@@ -1529,6 +1546,8 @@ class CliAdapter {
       cacheReadTokens: 0,
       ok: false,
       error: String(message).slice(0, 200),
+      failureCode: classifyFailure(message),
+      retryAt,
     })
   }
 
@@ -2073,6 +2092,7 @@ class CliAdapter {
     let reasoningIndex = -1
     let reasoningText = ''
     let cliError = ''
+    let retryAt
     let stdout = ''
     let codexCompleted = false
     let codexTurnStarted = false
@@ -2162,7 +2182,11 @@ class CliAdapter {
           clearTimeout(firstResponseTimer)
           firstResponseTimer = undefined
         }
-        if (parsed?.error) cliError = String(parsed.error).slice(0, 400)
+        if (parsed?.error) {
+          cliError = String(parsed.error).slice(0, 400)
+          retryAt = Number.isSafeInteger(parsed.retryAfterMs) && parsed.retryAfterMs > 0
+            && parsed.retryAfterMs <= 8.64e15 - Date.now() ? Date.now() + parsed.retryAfterMs : undefined
+        }
         if (parsed?.usage) {
           // A route that reports usage per agent step accumulates it. A route
           // that reports one total for the turn replaces it, so nothing is
@@ -2229,9 +2253,10 @@ class CliAdapter {
 
       if (cliError || (text.length > 0 && exit?.code !== 0)) {
         const detail = cliError || stderr.trim().slice(0, 500) || 'the CLI did not complete'
+        const hint = FAILURE_HINTS[classifyFailure(detail)]
         const message = `llm-cli: "${route.displayName}" failed (exit ${exit?.code ?? 'null'}): ${detail}`
-        this.recordFailure(provider, options.model, turnStartedAt, message)
-        throw new Error(message)
+        this.recordFailure(provider, options.model, turnStartedAt, message, retryAt)
+        throw new Error([message, retryAt ? `Retry after ${new Date(retryAt).toISOString()}.` : hint].filter(Boolean).join(' '))
       }
 
       if (text.length === 0 && exit?.code === 0) {
