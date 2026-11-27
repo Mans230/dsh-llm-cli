@@ -1552,6 +1552,18 @@ class CliAdapter {
     const route = this.config.providers.opencode
     if (!route || route.modelInfoArgs === false) return
     if (this.opencodeModelInfo && Date.now() - this.opencodeModelInfo.at < LIST_TTL_MS) return
+    if (this.opencodeModelInfoPending) return this.opencodeModelInfoPending
+    const pending = this.fetchOpencodeModelInfo(route)
+    this.opencodeModelInfoPending = pending
+    try {
+      const byModel = await pending
+      if (this.opencodeModelInfoPending === pending) this.opencodeModelInfo = { at: Date.now(), byModel }
+    } finally {
+      if (this.opencodeModelInfoPending === pending) this.opencodeModelInfoPending = undefined
+    }
+  }
+
+  async fetchOpencodeModelInfo(route) {
     const byModel = {}
     try {
       const { code, stdout } = await runCapture(route, route.modelInfoArgs, { cwd: this.config.cwd, timeoutMs: 30000 })
@@ -1568,7 +1580,7 @@ class CliAdapter {
         }
       }
     } catch { /* Older CLIs without the catalog API retain the labelled fallback. */ }
-    this.opencodeModelInfo = { at: Date.now(), byModel }
+    return byModel
   }
 
   /** The CLI route keeps the harness default retry policy. */
@@ -1799,6 +1811,7 @@ class CliAdapter {
     this.limitsCache = undefined
     this.listCache.clear()
     this.opencodeModelInfo = undefined
+    this.opencodeModelInfoPending = undefined
   }
 
   async cliUsage(days = 0, { force = false } = {}) {
