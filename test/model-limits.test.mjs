@@ -7,7 +7,7 @@
  */
 import { mount } from './_harness.mjs'
 import { assertEqual } from './_assert.mjs'
-import { writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const { adapter, routes } = mount({
@@ -54,13 +54,24 @@ const catalog = mount({ providers: { grok: false, codex: false, opencode: {
   bin: process.execPath, models: ['opencode/beam-free', 'opencode/deepseek-v4.1-flash-free', 'opencode/deepseek-v4.1-flash'],
 } } })
 const file = join(catalog.root, 'catalog.mjs')
-writeFileSync(file, `console.log(${JSON.stringify(JSON.stringify({data:[
+const launches = join(catalog.root, 'catalog-launches')
+writeFileSync(file, `import { appendFileSync } from 'node:fs'
+appendFileSync(${JSON.stringify(launches)}, '1')
+console.log(${JSON.stringify(JSON.stringify({data:[
   {providerID:'opencode',id:'beam-free',limit:{context:1048576,output:131072}},
   {providerID:'opencode',id:'deepseek-v4.1-flash-free',limit:{context:200000,output:32000}},
   {providerID:'opencode',id:'deepseek-v4.1-flash',limit:{context:1000000,output:384000}},
 ]}))})`)
 catalog.adapter.config.providers.opencode.modelInfoArgs = [file]
+await Promise.all([
+  catalog.adapter.listModels('opencode'),
+  catalog.adapter.resolveModel('opencode','opencode/beam-free'),
+  catalog.adapter.resolveModel('opencode','opencode/deepseek-v4.1-flash-free'),
+])
+assertEqual(readFileSync(launches,'utf8'),'1','concurrent cold model reads share one OpenCode catalog process')
+catalog.adapter.invalidateCaches()
 await catalog.adapter.listModels('opencode')
+assertEqual(readFileSync(launches,'utf8'),'11','forced refresh starts a fresh catalog process')
 assertEqual(catalog.adapter.limitsFor('opencode','opencode/beam-free').contextWindow,1048576,'million-context free models preserve their published capacity')
 assertEqual(catalog.adapter.limitsFor('opencode','opencode/deepseek-v4.1-flash-free').contextWindow,200000,'a configured cap cannot inflate a smaller published capacity')
 assertEqual(catalog.adapter.limitsFor('opencode','opencode/deepseek-v4.1-flash').contextWindow,500000,'other catalog models use the requested 500k cap')
