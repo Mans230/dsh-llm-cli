@@ -8,6 +8,12 @@ All notable changes to this plugin are documented here. The format follows
 
 ### Fixed
 
+- Resolve the hosted JSX runtime and React DOM from Harness alongside React;
+  cover React 18.3.1 and React 19 hosts in Chromium and CI.
+- Keep Codex context-full markers out of measured usage, isolate approximate
+  histories per rollout, and reconcile model/session details with each selected
+  time window.
+
 - Treat tunnel and proxy requests as remote so a loopback upstream socket
   cannot bypass dashboard authentication or expose setup/update action tokens.
 - Refuse malformed dashboard cookies without throwing.

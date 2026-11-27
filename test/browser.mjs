@@ -4,6 +4,8 @@ import { build } from 'esbuild'
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { renderUsageHtml, windowCliUsage } from '../index.js'
 import { assert, assertEqual } from './_assert.mjs'
+import { createRequire } from 'node:module'
+const require = createRequire(import.meta.url)
 
 const now = Date.now()
 const usage = (id, models, multiplier = 1) => {
@@ -35,7 +37,7 @@ const initial = payload(7)
 const html = renderUsageHtml(initial, now, initial.routes, '', initial.cliUsage, initial.plans, { autoRefresh: false })
 mkdirSync('export/redesign', { recursive: true })
 writeFileSync('export/redesign/example.html', html)
-const browser = await chromium.launch({ channel: 'chrome', headless: true })
+const browser = await chromium.launch({ ...(process.env.DSH_BROWSER_CHANNEL === 'chromium' ? {} : { channel: 'chrome' }), headless: true })
 const errors = []
 const requests = []
 const page = await browser.newPage({ viewport: { width: 1440, height: 1050 } })
@@ -47,6 +49,7 @@ await page.route('http://dashboard.test/**', async route => {
     const days = url.searchParams.get('days') === 'all' ? 0 : Number(url.searchParams.get('days') || 7)
     await route.fulfill({ json: payload(days) })
   } else if (url.pathname.endsWith('setup.json')) await route.fulfill({ json: { providers: [] } })
+  else if (url.pathname === '/host') await route.fulfill({ contentType: 'text/html', body: '<!doctype html><html><body><main id="host-root"></main></body></html>' })
   else await route.fulfill({ contentType: 'text/html', body: html })
 })
 try {
@@ -95,23 +98,38 @@ try {
   await page.screenshot({ path: 'export/redesign/mobile-dark.png', fullPage: true })
   await page.emulateMedia({ colorScheme: 'light' })
   await page.screenshot({ path: 'export/redesign/mobile-light.png', fullPage: true })
-  // Also execute the real host loader with a shared React instance.
-  const bootstrap = await build({ stdin: { contents: `import * as React from 'react'; import {createRoot} from 'react-dom/client'; window.__hostReact=React; window.__hostMount=createRoot; window.__ModuleLoader__={load:m=>window.__plugin=m};`, resolveDir: process.cwd() }, bundle: true, format: 'iife', write: false })
+  // Test the deployed Harness runtime as well as the standalone development
+  // version. The renderer and every nested React import must share a version.
+  for (const hostVersion of [18, 19]) {
+  const reactPackage = hostVersion === 18 ? 'react18' : 'react'
+  const domPackage = hostVersion === 18 ? 'react-dom18' : 'react-dom'
+  const bootstrap = await build({ stdin: { contents: `import * as React from '${reactPackage}'; import {createRoot} from '${domPackage}/client'; import * as ReactDOM from '${domPackage}'; import * as JSX from '${reactPackage}/jsx-runtime'; window.__hostReact=React; window.__hostPlatform={'react':React,'react-dom':ReactDOM,'react/jsx-runtime':JSX}; window.__hostMount=createRoot; window.__ModuleLoader__={load:m=>window.__plugin=m};`, resolveDir: process.cwd() }, bundle: true, format: 'iife', plugins: [{ name: 'test-host-react', setup(builder) { builder.onResolve({ filter: /^react$/ }, () => ({ path: require.resolve(reactPackage) })) } }], write: false })
   await page.setViewportSize({ width: 1100, height: 900 })
   await page.goto('http://dashboard.test/host')
   await page.evaluate(() => { document.body.innerHTML = '<main id="host-root"></main>'; document.querySelectorAll('style').forEach(el => el.remove()) })
   await page.addScriptTag({ content: bootstrap.outputFiles[0].text })
   await page.addScriptTag({ content: readFileSync('client.js', 'utf8') })
   await page.evaluate(() => {
-    const plugin = window.__plugin.factory(id => { if (id === 'react') return window.__hostReact; throw Error(id) })
+    const plugin = window.__plugin.factory(id => { if (id in window.__hostPlatform) return window.__hostPlatform[id]; throw Error(id) })
     window.__hostMount(document.getElementById('host-root')).render(window.__hostReact.createElement(plugin.LlmCliPage, { view: 'full' }))
   })
-  await page.getByRole('heading', { name: 'Usage, in focus.' }).waitFor()
+  assert((await page.evaluate(() => window.__hostReact.version)).startsWith(`${hostVersion}.`), `host fixture actually uses React ${hostVersion}`)
+  await page.getByRole('heading', { name: 'Usage, in focus.' }).waitFor({ timeout: 10000 })
   await page.locator('.recharts-bar-rectangle').first().waitFor()
+  await page.locator('.recharts-bar-rectangle').last().hover()
+  await page.locator('.recharts-tooltip-wrapper').waitFor({ state: 'visible' })
+  await page.getByRole('tab', { name: 'Overview', exact: true }).focus()
+  await page.keyboard.press('ArrowRight')
+  await page.keyboard.press('Enter')
+  await page.getByLabel('Search models').waitFor()
+  await page.getByRole('button', { name: 'Inspect Codex gpt-6.1-sol' }).click()
+  assertEqual(await page.getByLabel('Model filter').inputValue(), 'codex:gpt-6.1-sol', `React ${hostVersion} model inspection works`)
+  await page.getByRole('button', { name: 'All CLIs', exact: true }).click()
   await page.getByRole('button', { name: '7h', exact: true }).click()
   await page.getByRole('tab', { name: 'Limits & budgets' }).click()
   await page.getByText('Grok weekly premium limit', { exact: true }).waitFor()
-  await page.screenshot({ path: 'export/redesign/hosted-limits.png', fullPage: true })
+  await page.screenshot({ path: `export/redesign/hosted-react${hostVersion}-limits.png`, fullPage: true })
+  }
   assertEqual(errors, [], 'both real browser entry points have no uncaught errors')
-  console.log('ok  browser: standalone + hosted, filters, models, ranges, refresh, quotas, light/dark, desktop/phone')
-} finally { await browser.close() }
+  console.log('ok  browser: standalone + React 18/19 hosts, filters, models, ranges, refresh, quotas, light/dark, desktop/phone')
+} finally { if (errors.length) console.error('Browser errors:', errors); await browser.close() }

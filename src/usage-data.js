@@ -35,7 +35,7 @@ export function selectUsage(data, { provider = 'all', model = 'all', days = 7 } 
     const usage = data.cliUsage?.[id]
     const matching = (usage?.models ?? []).filter(row => model === 'all' || row.id === model)
     const totals = model === 'all' ? { ...empty(), ...usage } : matching.reduce(add, empty())
-    const events = (usage?.timeline ?? []).filter(row => row.at >= since && row.at <= now && (model === 'all' || row.model === model))
+    const events = (usage?.timeline ?? []).filter(row => row.at > 0 && row.at >= since && row.at <= now && (model === 'all' || row.model === model))
     return { id, name: CLI_NAMES[id], usage, totals, events, available: usage?.available === true, measured: usage?.available === true && (model === 'all' || matching.length > 0) }
   })
   const measured = sources.filter(source => source.measured)
@@ -73,7 +73,7 @@ export function selectUsage(data, { provider = 'all', model = 'all', days = 7 } 
     if (!source.available) return [`${source.name}: ${source.usage.note || 'no recorded usage in this range'}.`]
     const notes = []
     if (source.id === 'opencode') notes.push(`OpenCode provides whole-day totals and daily steps. Hourly and per-model token history are unavailable.${source.usage.scopeDays > days && days > 0 ? ` Totals cover ${source.usage.scopeDays} full day(s).` : ''}`)
-    if (source.usage.timelinePrecision === 'session') notes.push(`${source.name} history groups session totals by last activity; this is not exact turn timing.`)
+    if (source.usage.timelinePrecision === 'session' || source.usage.timelinePrecision === 'mixed') notes.push(`${source.name} history includes session totals grouped by last activity where exact timestamps are unavailable.`)
     return notes
   })
   return { sources, totals, models, series: [...buckets.values()], hourly, hasData: measured.length > 0, costAvailable: reportedCost.length > 0, partialCost: reportedCost.length < measured.length, warnings }

@@ -319,7 +319,7 @@ covering a day of data.
 npm ci --legacy-peer-deps  # DSH supplies the Harness peer packages at runtime
 npm run build             # rebuild both dashboard entry points
 npm test        # runs every test/*.test.mjs in its own process
-npm run test:ui # Chromium integration checks (Google Chrome installed)
+npm run test:ui # Chromium checks: standalone, React 18.3.1 and React 19 hosts
 ```
 
 The suite makes no external network calls: it drives stub CLIs
@@ -328,6 +328,13 @@ builds synthetic Codex rollouts for the usage reader. Frontend development uses
 React, Base UI, Tailwind CSS, coss ui source components, and Recharts. Published
 packages include the generated assets; a running Harness needs no frontend build
 step, CDN, or additional runtime dependency.
+
+The hosted bundle resolves `react`, `react/jsx-runtime`, and `react-dom` from
+Harness's platform module table, keeping element and renderer identities aligned
+with the shell. The standalone page bundles its own React runtime. Browser tests
+exercise both host versions, tooltips, keyboard tabs, filtering, and model
+inspection. They use installed Google Chrome by default; CI installs Playwright
+Chromium and selects it with `DSH_BROWSER_CHANNEL=chromium`.
 
 ### Dashboard
 
@@ -348,8 +355,11 @@ The Harness panel and `/llm-cli/usage` share the same responsive dashboard:
 
 Codex token history uses timestamped cumulative-usage deltas, deduplicates repeated
 snapshots, and preserves the model active at each event. A short range excludes
-older usage even when its session remains active. When timestamped history cannot
-account for the full total, the view labels its session-based approximation.
+older usage even when its session remains active. Synthetic context-full markers
+do not replace measured usage counters. Totals, model rows, and session details
+use the same attributed events, including after time filtering. Missing timestamp
+coverage is handled per rollout and labeled as a session approximation; it never
+downgrades exact event history from other rollouts.
 Grok's model accounting is session-based and is grouped by last activity.
 OpenCode reports whole-day totals and daily steps, so exact hourly or per-model
 token history is unavailable. Its short-range totals explicitly name their actual

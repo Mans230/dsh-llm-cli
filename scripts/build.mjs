@@ -13,7 +13,9 @@ const tokens = readFileSync(join(root, 'src/tokens.css'), 'utf8')
 const scoped = `${tokens}\n@scope (.dsh-dashboard){${styles}}`
 writeFileSync(join(root, 'dist/dashboard.css'), scoped)
 const common = { bundle: true, minify: true, jsx: 'automatic', target: ['es2022'], define: { 'process.env.NODE_ENV': '"production"' }, legalComments: 'eof' }
-const hosted = await build({ ...common, absWorkingDir: root, entryPoints: ['src/dashboard.tsx'], format: 'cjs', plugins: [{ name: 'host-react', setup(builder) { builder.onResolve({ filter: /^react$/ }, () => ({ path: 'react', external: true })) } }], write: false })
+// Match Harness platform seeds: React, its JSX runtime, and the renderer must
+// all come from the shell. The standalone build below remains self-contained.
+const hosted = await build({ ...common, absWorkingDir: root, entryPoints: ['src/dashboard.tsx'], format: 'cjs', external: ['react', 'react-dom'], write: false })
 const source = readFileSync(join(root, 'src/host-client.js'), 'utf8')
 const factory = `const UsageExplorer = (()=>{ const module={exports:{}}; const exports=module.exports; ${hosted.outputFiles[0].text}\nreturn module.exports.UsageExplorer; })();`
 const output = source.replace('/* DASHBOARD_BUNDLE */', () => factory).replace('/* DASHBOARD_STYLES */', () => `const dashboardStyles = ${JSON.stringify(scoped)};`)

@@ -10,6 +10,8 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as RealReact from 'react'
+import * as JSX from 'react/jsx-runtime'
+import * as ReactDOM from 'react-dom'
 import { apply, describeRoutes } from '../index.js'
 import { assert, assertEqual } from './_assert.mjs'
 
@@ -125,6 +127,8 @@ function loadClient(overrides) {
   const stub = makeReact(overrides)
   const exportsObj = loaded.factory((id) => {
     if (id === 'react') return stub.React
+    if (id === 'react/jsx-runtime') return JSX
+    if (id === 'react-dom') return ReactDOM
     throw new Error(`unexpected require: ${id}`)
   })
   return { exportsObj, cells: stub.cells, effects: stub.effects, reset: stub.reset }

@@ -440,6 +440,31 @@ function windowGrokUsage(full, sinceMs, windowDays = 0) {
  */
 function windowCliUsage(full, sinceMs, what = 'cli', windowDays = 0) {
   if (!full || !(sinceMs > 0)) return full
+  if (full.timelineAttribution === 'per-session') {
+    const timeline = full.timeline.filter(event => event.at >= sinceMs)
+    const { totals, models, daily } = summarizeCodexEvents(timeline)
+    const bySession = new Map()
+    for (const event of timeline) {
+      const events = bySession.get(event.sessionId) ?? []
+      events.push(event)
+      bySession.set(event.sessionId, events)
+    }
+    const sessions = full.sessions.flatMap(session => {
+      const events = bySession.get(session.id)
+      if (!events?.length) return []
+      const scoped = summarizeCodexEvents(events)
+      return [{ ...session, ...scoped.totals, models: scoped.models }]
+    })
+    return {
+      ...full, ...totals, models, daily, timeline, sessions,
+      mix: tokenMix(totals, { cacheInInput: true }),
+      timelinePrecision: codexTimelinePrecision(timeline),
+      available: sessions.length > 0,
+      sessionCount: sessions.length,
+      totalSessions: full.sessionCount ?? 0,
+      note: sessions.length ? '' : full.available === false && full.note ? full.note : `no ${what} sessions in the ${windowLabelFor(windowDays)}`,
+    }
+  }
   const cutoffDate = new Date(sinceMs).toISOString().slice(0, 10)
   const sessions = (full.sessions ?? []).filter((session) => (session.endedAt ?? 0) >= sinceMs)
   const totals = blankUsage()
@@ -492,6 +517,30 @@ function windowCliUsage(full, sinceMs, what = 'cli', windowDays = 0) {
           : `no ${what} sessions in the ${windowLabelFor(windowDays)}`
         : '',
   }
+}
+
+/** One attribution source for CLI totals, per-model rows and session details. */
+function summarizeCodexEvents(events) {
+  const totals = blankUsage()
+  const byModel = new Map()
+  const byDay = new Map()
+  for (const event of events) {
+    addUsage(totals, event)
+    const model = byModel.get(event.model) ?? { id: event.model, ...blankUsage() }
+    addUsage(model, event)
+    byModel.set(event.model, model)
+    if (!(event.at > 0)) continue
+    const date = new Date(event.at).toISOString().slice(0, 10)
+    const day = byDay.get(date) ?? { date, ...blankUsage() }
+    addUsage(day, event)
+    byDay.set(date, day)
+  }
+  return { totals, models: [...byModel.values()].sort((a, b) => b.totalTokens - a.totalTokens), daily: [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date)) }
+}
+
+function codexTimelinePrecision(events) {
+  const approximate = events.filter(event => event.precision === 'session').length
+  return approximate === 0 ? 'event' : approximate === events.length ? 'session' : 'mixed'
 }
 
 /**
@@ -594,6 +643,7 @@ function parseRollout(file) {
   }
   const value = { sessionId: '', model: '', endedAt: 0, sessionTotals: null, rate: null, rateAt: 0, contextWindow: undefined, days: [], timeline: [] }
   let previous = blankUsage()
+  const accounted = blankUsage()
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim()
     if (trimmed.length === 0 || trimmed[0] !== '{') continue
@@ -614,18 +664,33 @@ function parseRollout(file) {
     } else if (event?.type === 'event_msg' && payload?.type === 'token_count') {
       const info = payload.info
       const cumulative = info?.total_token_usage
+      // Codex fill_to_context_window reports context occupancy in total_tokens
+      // while zeroing all component counters. Keep the usage already measured;
+      // reset only the delta baseline for subsequent component-counter usage.
+      const contextFill = cumulative && toCount(cumulative.total_tokens) > 0 &&
+        ['input_tokens', 'output_tokens', 'cached_input_tokens', 'reasoning_output_tokens', 'cache_write_input_tokens'].every(key => toCount(cumulative[key]) === 0)
       if (cumulative && typeof cumulative === 'object') {
-        const current = codexUsage(cumulative)
-        const delta = Object.fromEntries(USAGE_FIELDS.map(field => [field, Math.max(0, (current[field] ?? 0) - (previous[field] ?? 0))]))
-        delta.totalTokens = tokenMix(delta, { cacheInInput: true }).total
-        if (at > 0 && delta.totalTokens > 0) value.timeline.push({ at, model: value.model || 'codex', ...delta, turns: 1 })
-        previous = current
-        value.sessionTotals = current
+        if (contextFill) previous = blankUsage()
+        else {
+          const current = codexUsage(cumulative)
+          // Context occupancy may remain in total_tokens after a fill marker.
+          // Billable usage is derived solely from its measured components.
+          current.totalTokens = tokenMix(current, { cacheInInput: true }).total
+          const reset = ['inputTokens', 'outputTokens'].some(key => current[key] < previous[key])
+          const baseline = reset ? blankUsage() : previous
+          const delta = Object.fromEntries(USAGE_FIELDS.map(field => [field, Math.max(0, (current[field] ?? 0) - (baseline[field] ?? 0))]))
+          delta.totalTokens = tokenMix(delta, { cacheInInput: true }).total
+          delta.turns = delta.totalTokens > 0 ? 1 : 0
+          addUsage(accounted, delta)
+          if (at > 0 && delta.totalTokens > 0) value.timeline.push({ at, model: value.model || 'codex', ...delta })
+          previous = current
+          value.sessionTotals = { ...accounted }
+        }
       }
       const contextWindow = firstNumber(info?.model_context_window, info?.modelContextWindow)
       if (contextWindow !== undefined) value.contextWindow = contextWindow
       const perTurn = info?.last_token_usage
-      if (perTurn && typeof perTurn === 'object') {
+      if (!contextFill && perTurn && typeof perTurn === 'object') {
         value.days.push({ date: new Date(at || Date.now()).toISOString().slice(0, 10), usage: codexUsage(perTurn) })
       }
       if (payload.rate_limits && typeof payload.rate_limits === 'object') {
@@ -670,9 +735,6 @@ function readCodexCliUsage(dir) {
   }
   if (files.length === 0) return { ...empty, note: 'no codex session rollouts recorded yet' }
 
-  const totals = blankUsage()
-  const byModel = new Map()
-  const byDay = new Map()
   const sessions = []
   let bestLimitsAt = 0
   let limits = { primary: null, secondary: null }
@@ -683,14 +745,6 @@ function readCodexCliUsage(dir) {
   for (const file of files) {
     const parsed = parseRollout(file)
     if (!parsed) continue
-    timeline.push(...parsed.timeline)
-    // Per-day rows count even when the rollout has no cumulative usage block.
-    for (const day of parsed.days) {
-      const row = byDay.get(day.date) ?? { date: day.date, ...blankUsage() }
-      addUsage(row, day.usage)
-      row.turns += 1
-      byDay.set(day.date, row)
-    }
     if (parsed.contextWindow !== undefined) lastContextWindow = parsed.contextWindow
     const { sessionId, model, endedAt, sessionTotals, rate, rateAt } = parsed
     // Quota-only events are useful even before a session records token totals.
@@ -705,45 +759,28 @@ function readCodexCliUsage(dir) {
       }
     }
     if (!sessionTotals) continue
-    addUsage(totals, sessionTotals)
-    totals.turns += 1
-    const modelId = model || 'codex'
-    const modelRow = byModel.get(modelId) ?? { id: modelId, ...blankUsage() }
-    addUsage(modelRow, sessionTotals)
-    modelRow.turns += 1
-    byModel.set(modelId, modelRow)
+    const id = sessionId || basename(file)
+    const recorded = summarizeCodexEvents(parsed.timeline)
+    // An incomplete timestamp history affects only this rollout. Never replace
+    // another session's exact event history with its last-activity aggregate.
+    const exact = USAGE_FIELDS.every(key => (recorded.totals[key] ?? 0) === (sessionTotals[key] ?? 0))
+    const events = (exact ? parsed.timeline : [{ at: endedAt, model: model || 'codex', ...sessionTotals }])
+      .map(event => ({ ...event, sessionId: id, precision: exact ? 'event' : 'session' }))
+    timeline.push(...events)
+    const scoped = summarizeCodexEvents(events)
     sessions.push({
-      id: sessionId || basename(file),
-      endedAt,
-      model: modelId,
-      models: [{ id: modelId, ...sessionTotals, turns: 1 }],
-      ...sessionTotals,
-      turns: 1,
+      id, endedAt,
+      // The final active model is metadata, not the owner of the session total.
+      model: model || 'codex',
+      models: scoped.models,
+      ...scoped.totals,
+      timelinePrecision: exact ? 'event' : 'session',
     })
   }
 
   sessions.sort((left, right) => right.endedAt - left.endedAt)
-  const models = [...byModel.values()].sort((left, right) => right.totalTokens - left.totalTokens)
-  const daily = [...byDay.values()].sort((left, right) => (left.date < right.date ? -1 : 1))
-  // Codex counts cached input inside input_tokens.
+  const { totals, models, daily } = summarizeCodexEvents(timeline)
   const mix = tokenMix(totals, { cacheInInput: true })
-  const exactTimeline = timeline.reduce((sum, event) => sum + event.totalTokens, 0) === mix.total
-  if (exactTimeline) {
-    const eventModels = new Map()
-    const eventDays = new Map()
-    for (const event of timeline) {
-      const row = eventModels.get(event.model) ?? { id: event.model, ...blankUsage() }
-      addUsage(row, event)
-      eventModels.set(event.model, row)
-      const date = new Date(event.at).toISOString().slice(0, 10)
-      const day = eventDays.get(date) ?? { date, ...blankUsage() }
-      addUsage(day, event)
-      eventDays.set(date, day)
-    }
-    models.splice(0, models.length, ...[...eventModels.values()].sort((a, b) => b.totalTokens - a.totalTokens))
-    daily.splice(0, daily.length, ...[...eventDays.values()].sort((a, b) => a.date.localeCompare(b.date)))
-    totals.turns = timeline.length
-  }
   return {
     ...empty,
     available: sessions.length > 0,
@@ -754,8 +791,9 @@ function readCodexCliUsage(dir) {
     sessionCount: sessions.length,
     models,
     daily,
-    timeline: exactTimeline ? timeline.sort((a, b) => a.at - b.at) : sessions.flatMap(session => session.models.map(model => ({ at: session.endedAt, model: model.id, ...model }))),
-    timelinePrecision: exactTimeline ? 'event' : 'session',
+    timeline: timeline.sort((a, b) => a.at - b.at),
+    timelineAttribution: 'per-session',
+    timelinePrecision: codexTimelinePrecision(timeline),
     limits,
     limitsObservedAt,
     limitsStale: Object.fromEntries(['primary', 'secondary'].map((key) => [key,

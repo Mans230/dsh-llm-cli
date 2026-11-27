@@ -20,10 +20,12 @@ try {
   assert(Array.isArray(full.timeline), 'Codex exposes timestamped usage')
   assertEqual(full.timeline.map(row => [row.model, row.totalTokens]), [['old-model', 110], ['new-model', 70]], 'deltas retain the model active at each event and deduplicate repeated snapshots')
   assertEqual(full.models.map(row => [row.id, row.totalTokens]), [['old-model', 110], ['new-model', 70]], 'lifetime model totals retain model switches within a session')
+  assertEqual(full.sessions[0].models.map(row => [row.id, row.totalTokens]), [['old-model', 110], ['new-model', 70]], 'session model details agree with lifetime event attribution')
   const short = windowCliUsage(full, now - 7 * 3600000, 'codex', 7 / 24)
   assertEqual(short.totalTokens, 70, '7h totals exclude the old part of a still-active session')
   assertEqual(short.models.map(row => row.id), ['new-model'], '7h model totals follow token events')
   assertEqual(short.timeline.length, 1, 'the series uses the same window as totals')
+  assertEqual(short.sessions[0].models.map(row => [row.id, row.totalTokens]), [['new-model', 70]], 'windowed session details agree with windowed model totals')
   assertEqual(windowCliUsage(full, now - 24 * 3600000, 'codex', 1).totalTokens, 180, '24h includes both events')
 } finally { rmSync(root, { recursive: true, force: true }) }
 console.log('ok  timeline.test')
