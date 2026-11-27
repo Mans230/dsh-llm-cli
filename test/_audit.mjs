@@ -54,7 +54,6 @@ if(mode === 'signin-real'){
   for(const key of ['OPENAI_API_KEY','CODEX_API_KEY','CODEX_ACCESS_TOKEN','XAI_API_KEY','GROK_DEPLOYMENT_KEY'])delete process.env[key]
   for(const provider of ['codex','grok','opencode']){
     const route={...m.adapter.config.providers[provider]}
-    if(provider==='opencode'){route.statusArgs=['auth','list','--standalone'];route.loginArgs=['auth','login','opencode','--method','device','--standalone']}
     const manager=new host.SignInManager({cwd:profile,signInTtlMs:30000,providers:{[provider]:route}})
     await check('real isolated device flow: '+provider,async()=>{
       const before=await manager.status(provider)

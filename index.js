@@ -2415,7 +2415,7 @@ class CliAdapter {
  */
 const LOGIN = {
   opencode: {
-    loginArgs: ['auth', 'login', 'opencode', '--method', 'device'],
+    loginArgs: ['auth', 'login', 'opencode', '--method', 'device', '--standalone'],
     statusArgs: ['auth', 'list'],
     signedIn: (out) => /\bstored\b|\boauth\b|\bapi[- ]key\b|\benv\b/i.test(out) && !/no (?:authenticated )?integrations|0 credentials|not authenticated/i.test(out),
     note: 'OpenCode free models need no sign-in; this is only for a paid OpenCode account.',
@@ -2595,7 +2595,11 @@ class SignInManager {
     await this.setup?.ensure(provider)
     if (signal?.aborted) throw new Error('llm-cli: sign-in was aborted')
     const existing = this.pending.get(provider)
-    if (existing) return { url: existing.url, code: existing.code, resumed: true }
+    if (existing) {
+      const instructions = await existing.instructions
+      if (signal?.aborted) throw new Error('llm-cli: sign-in was aborted')
+      return { ...instructions, resumed: true }
+    }
     this.failures.delete(provider)
     const { route, loginArgs, note } = this.routeFor(provider)
     const child = spawnCommand(route, loginArgs, {
@@ -2619,7 +2623,6 @@ class SignInManager {
     child.stdout?.on('data', collect)
     child.stderr?.on('data', collect)
 
-    let closed = false
     const done = new Promise((resolve) => {
       child.on('close', (code) => resolve({ code, text }))
       child.on('error', (error) => resolve({ code: null, text: `${text}\n${error.message}` }))
@@ -2630,43 +2633,42 @@ class SignInManager {
     const onAbort = () => this.cancel(provider)
     signal?.addEventListener('abort', onAbort, { once: true })
     done.then((result) => {
-      closed = true
+      entry.result = result
       if (!entry.cancelled && result.code !== 0) this.failures.set(provider, `The ${provider} sign-in failed (exit ${result.code ?? 'unknown'})`)
       clearTimeout(entry.timer)
       signal?.removeEventListener('abort', onAbort)
       if (this.pending.get(provider) === entry) this.pending.delete(provider)
     })
+    entry.instructions = this.waitForInstructions(provider, entry, signal, note)
+    return entry.instructions
+  }
 
+  async waitForInstructions(provider, entry, signal, note) {
     // Poll for the prompt rather than reading one line: the CLI may print the
     // URL and the code on separate writes.
     const deadline = Date.now() + 15000
     let partialAt = 0
-    let info = parseDeviceInfo(text)
-    while (Date.now() < deadline && !closed && !signal?.aborted) {
-      if (info.url && info.code) break
-      if (info.url || info.code) {
+    while (Date.now() < deadline && !entry.result && !entry.cancelled && !signal?.aborted) {
+      if (entry.url && entry.code) break
+      if (entry.url || entry.code) {
         partialAt ||= Date.now()
         if (Date.now() - partialAt >= 1000) break
       }
       await new Promise((resolve) => setTimeout(resolve, 200))
-      info = parseDeviceInfo(text)
     }
 
     if (signal?.aborted) throw new Error('llm-cli: sign-in was aborted')
-    if (closed) {
-      const settled = await done
-      if (settled.code !== 0) throw new Error(`llm-cli: "${provider}" sign-in failed (exit ${settled.code ?? 'unknown'})`)
-      if (!info.url && !info.code) throw new Error(`llm-cli: "${provider}" sign-in exited before printing a code`)
-    }
-
-    entry.url = info.url
-    entry.code = info.code
-    if (!closed) {
+    if (entry.cancelled) throw new Error('llm-cli: sign-in was canceled')
+    const { url, code, result } = entry
+    if (result) {
+      if (result.code !== 0) throw new Error(`llm-cli: "${provider}" sign-in failed (exit ${result.code ?? 'unknown'})`)
+      if (!url && !code) throw new Error(`llm-cli: "${provider}" sign-in exited before printing a code`)
+    } else {
       entry.timer = setTimeout(() => this.cancel(provider), this.ttlMs)
       entry.timer.unref?.()
     }
 
-    return { url: info.url, code: info.code, note }
+    return { url, code, note }
   }
 
   /** Close a waiting login when its caller or plugin goes away. */

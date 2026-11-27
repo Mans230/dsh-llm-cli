@@ -26,6 +26,7 @@ const failedProbe = new SignInManager({ cwd: here, providers: {
 assertEqual((await failedProbe.status('opencode')).signedIn, false, 'a failed OpenCode status probe cannot report signed in')
 const emptyProbe = new SignInManager({cwd:here,providers:{opencode:{bin:process.execPath,statusArgs:['-e','process.exit(0)']}}})
 assertEqual((await emptyProbe.status('opencode')).signedIn,false,'empty successful output is not proof of authentication')
+assert(emptyProbe.routeFor('opencode').loginArgs.includes('--standalone'), 'OpenCode login uses a private CLI instance to print device instructions')
 
 const flag = join(tmpdir(), `dsh-llm-cli-stub-flag-${process.pid}`)
 process.env.STUB_FLAG = flag
@@ -40,10 +41,18 @@ assertEqual(parseDeviceInfo('\x1b[94mAB12-CDE34\x1b[0m').code,'AB12-CDE34','long
 const splitFile=join(tmpdir(),`dsh-login-split-${process.pid}.mjs`)
 writeFileSync(splitFile,"console.log('Open https://example.test/device');setTimeout(()=>console.log('AB12-CDE34'),750);setTimeout(()=>{},10000)")
 const split=new SignInManager({cwd:here,providers:{codex:{bin:process.execPath,loginArgs:[splitFile]}}})
-const splitInstruction=await split.start('codex')
-assertEqual(splitInstruction.code,'AB12-CDE34','the code is collected even when it follows the URL in a later write')
-const splitEntry=split.pending.get('codex');split.cancel('codex');if(splitEntry)await splitEntry.done
-rmSync(splitFile,{force:true})
+try {
+  const [instruction, retry] = await Promise.all([split.start('codex'), split.start('codex')])
+  assertEqual(instruction.code,'AB12-CDE34','the code is collected even when it follows the URL in a later write')
+  assertEqual(retry.code, instruction.code, 'an overlapping request waits for the same device code')
+  assertEqual(retry.url, instruction.url, 'an overlapping request gets the same device URL')
+  assertEqual(retry.resumed, true, 'an overlapping request reuses the pending login')
+} finally {
+  const entry = split.pending.get('codex')
+  split.cancel('codex')
+  if (entry) await entry.done
+  rmSync(splitFile, { force: true })
+}
 const rejectedFile=join(tmpdir(),`dsh-login-rejected-${process.pid}.mjs`)
 writeFileSync(rejectedFile,"console.log('Open https://example.test/device?user_code=FAIL-1234');process.exit(3)")
 const rejected=new SignInManager({cwd:here,providers:{codex:{bin:process.execPath,loginArgs:[rejectedFile]}}})
