@@ -18,8 +18,12 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node-version }}
-      # No dependencies: the plugin only imports Node built-ins, and the tests
-      # drive stub CLIs, so nothing needs installing and nothing hits the network.
+      # The published plugin bundles its UI; contributors install the frontend
+      # toolchain here. Harness-only peers are supplied by DSH at runtime.
+      - name: Install frontend toolchain
+        run: npm ci --legacy-peer-deps
+      - name: Build shared dashboards
+        run: npm run build
       - name: Syntax check
         run: |
           node --check index.js

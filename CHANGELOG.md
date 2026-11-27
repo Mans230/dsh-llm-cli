@@ -19,6 +19,14 @@ All notable changes to this plugin are documented here. The format follows
 
 ### Added
 
+- Redesign both usage dashboards with shared coss ui/Base UI components,
+  Recharts, responsive light/dark layouts, CLI and model drill-down, model
+  search, metric selection, and 5h/7h/24h/7d/30d/90d/lifetime ranges.
+- Add timestamped Codex usage deltas for accurate short-range and per-model
+  history, with explicit session and whole-day scope notes for coarse sources.
+- Bundle frontend assets locally and retain setup, sign-in, update actions,
+  quota freshness, budgets, and an HTML fallback without a CDN dependency.
+
 - Stream Codex replies through app-server delta notifications and read live
   account quota, with explicit recorded-file fallback when unavailable.
 

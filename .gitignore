@@ -1,4 +1,4 @@
-# Dependencies (this plugin has none; peers come from the harness)
+# Frontend build dependencies (host peers come from the harness)
 node_modules/
 
 # Test artifacts

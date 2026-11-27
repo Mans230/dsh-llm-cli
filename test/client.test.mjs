@@ -9,6 +9,7 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import * as RealReact from 'react'
 import { apply, describeRoutes } from '../index.js'
 import { assert, assertEqual } from './_assert.mjs'
 
@@ -97,6 +98,7 @@ function makeReact(overrides = {}) {
   const effects = []
   let slot = 0
   const React = {
+    ...RealReact,
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat().filter((child) => child != null && child !== false) }),
     useState: (initial) => {
       const key = slot++
@@ -149,6 +151,7 @@ function render(node) {
   if (node == null || node === false || node === true) return ''
   if (typeof node === 'string' || typeof node === 'number') return String(node)
   if (Array.isArray(node)) return node.map(render).join('')
+  if (node.props?.onDaysChange) return '<usage-explorer>Shared analytics</usage-explorer>'
   if (typeof node.type === 'function') return render(node.type({ ...node.props, children: node.children }))
   const { type, props, children } = node
   const attrs = Object.entries(props ?? {})
@@ -176,47 +179,17 @@ const walk = (node, found = []) => {
 const buttonNamed = (node, label) => walk(node).find((element) => element.type === 'button' && element.children.includes(label))
 
 const html = pageOf(first)
-const navigation = walk(tree(first)).find(element => element.type === 'nav' && element.props['aria-label'] === 'Dashboard sections')
-assert(navigation, 'the dashboard offers in-page section navigation')
-for (const title of ['Status', 'Usage', 'Limits']) {
-  assert(buttonNamed(navigation, title), `navigation includes ${title}`)
-}
-const disclosureTitles = walk(tree(first)).filter(element => element.type === 'summary').map(element => element.children[0])
-assert(disclosureTitles.includes('CLI setup and sign-in') && disclosureTitles.includes('Plugin version and updates'), 'setup and updates are collapsed into disclosures')
-assert(html.includes('This Harness · All time'), 'the Harness totals explicitly say they are all time')
-assert(html.includes('The date filter applies only to CLI-recorded usage.'), 'the date filter explains its scope')
-const readiness = pageOf(loadClient({
-  0: { status: 'ready', data: {
-    ...payload,
-    routes: payload.routes.map(route => route.id === 'grok' ? { ...route, signedIn: false } : route),
-    recent: [{ at: Date.now(), provider: 'opencode', model: 'opencode/free', ok: false, error: 'Free usage limit reached. (HTTP 429)' }],
-  } },
-}))
-assert(readiness.indexOf('Provider status') >= 0 && readiness.indexOf('Provider status') < readiness.indexOf('CLI-recorded usage'), 'provider status appears above charts')
-assert(readiness.includes('Sign in on the Harness host'), 'signed-out providers offer a next step')
-assert(readiness.includes('opencode/free hit its free usage limit') && readiness.includes('Choose another model'), 'recorded free quota errors identify the affected model and what to do')
-assert(html.includes('Recorded snapshot:')&&html.includes('(stale)'),'recorded quotas expose their age and stale status')
-assert(html.includes('Live quota unavailable; showing the recorded CLI snapshot.'),'fallback clearly identifies the recorded quota')
-buttonNamed(tree(first),'Refresh').props.onClick()
-assertEqual(first.cells.get(5).current,true,'manual refresh requests a forced source reread')
+const explorer = walk(tree(first)).find(node => node.props?.onDaysChange)
+assertEqual(explorer.props.data, payload, 'shared analytics receives the authenticated host payload')
+explorer.props.onRefresh()
+assertEqual(first.cells.get(5).current, true, 'manual refresh requests a forced source reread')
+explorer.props.onDaysChange(7 / 24)
+assertEqual(first.cells.get(3).value, 7 / 24, 'the shared 7h control updates the host query window')
 first.reset()
 const summaryHtml = render(first.exportsObj.LlmCliPage({ view: 'summary' }))
 assert(summaryHtml.startsWith('<span') && !/<svg|<table/.test(summaryHtml), 'summary is one line without charts or tables')
-const count = (re) => (html.match(re) ?? []).length
-assert(count(/<svg/g) >= 4, `the page renders SVG charts (got ${count(/<svg/g)})`)
-assert(count(/<table/g) >= 3, `the page renders usage tables (got ${count(/<table/g)})`)
-for (const needle of [
-  'Codex daily tokens',
-  'Codex 5-hour limit',
-  'Codex weekly limit',
-  'Grok weekly premium limit',
-  'gpt-6.1-sol',
-  'Turns / steps',
-  '5h',
-  '7d',
-]) {
-  assert(html.includes(needle), `the rendered page contains "${needle}"`)
-}
+assert(html.includes('usage-explorer') && html.includes('Host management'), 'analytics and management share the host page')
+assert(html.includes('This Harness · All time') && html.includes('regardless of the selected date range'), 'the redesign preserves the lifetime scope of Harness totals')
 
 // --- The update action is offered only where it can actually run. A remote
 // reader gets the version check without the token, so the button must not
@@ -284,7 +257,7 @@ try {
   assertEqual(request.headers['x-llm-cli-token'], 'test-dashboard-secret', 'the inline form authenticates using a header')
   assertEqual(request.headers['x-llm-cli-remember'], '1', 'the inline form opts into the dashboard cookie')
   assert(!request.url.includes('test-dashboard-secret'), 'the secret is not in the URL')
-  assert(pageOf(inline).includes('Codex daily tokens'), 'successful access opens the charts in the same panel')
+  assert(pageOf(inline).includes('usage-explorer'), 'successful access opens the charts in the same panel')
 } finally {
   delete globalThis.window.location
   globalThis.fetch = savedFetch
@@ -334,17 +307,6 @@ try{
  assertEqual(account.cells.get(7).value.codex.installed,true,'successful installation updates the route state')
 }finally{globalThis.fetch=savedFetch}
 
-// Daily stacks use the same disjoint input/cache accounting as the token mix.
-const dailyPayload=structuredClone(payload)
-for(const id of ['grok','codex']) dailyPayload.cliUsage[id]={...dailyPayload.cliUsage[id],available:true,daily:[{date:new Date().toISOString().slice(0,10),inputTokens:100,outputTokens:20,cacheReadTokens:40,reasoningTokens:5,totalTokens:120}]}
-const dailyClient=loadClient({0:{status:'ready',data:dailyPayload}})
-const columns=walk(tree(dailyClient)).filter(node=>node.type?.name==='ColumnChart')
-assertEqual(columns.length,2,'Grok and Codex daily charts render')
-for(const chart of columns) {
- const sum=chart.props.data.reduce((sum,point)=>sum+chart.props.series.reduce((n,series)=>n+(point.values[series.key]??0),0),0)
- assertEqual(sum,120,'daily chart equals native total without counting cache or reasoning twice')
- assert(!chart.props.series.some(series=>series.key==='reasoningTokens'),'reasoning remains an annotation rather than an extra token slice')
-}
 const optionalPayload=structuredClone(payload)
 optionalPayload.routes=optionalPayload.routes.filter(route=>route.id==='opencode').map(route=>({...route,signedIn:false,signInOptional:true}))
 const optionalClient=loadClient({0:{status:'ready',data:optionalPayload},6:{actionToken:'fixture',providers:[{id:'opencode',installed:true}]}})

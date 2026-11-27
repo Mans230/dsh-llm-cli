@@ -316,12 +316,50 @@ covering a day of data.
 ## Development
 
 ```bash
+npm ci --legacy-peer-deps  # DSH supplies the Harness peer packages at runtime
+npm run build             # rebuild both dashboard entry points
 npm test        # runs every test/*.test.mjs in its own process
+npm run test:ui # Chromium integration checks (Google Chrome installed)
 ```
 
-The suite has **no dependencies and makes no network calls**: it drives stub CLIs
+The suite makes no external network calls: it drives stub CLIs
 (`test/stubs/stub-cli.mjs`) that emit the exact JSON shapes the CLIs emit, and it
-builds synthetic Codex rollouts for the usage reader.
+builds synthetic Codex rollouts for the usage reader. Frontend development uses
+React, Base UI, Tailwind CSS, coss ui source components, and Recharts. Published
+packages include the generated assets; a running Harness needs no frontend build
+step, CDN, or additional runtime dependency.
+
+### Dashboard
+
+The Harness panel and `/llm-cli/usage` share the same responsive dashboard:
+
+- Filter all CLIs, Codex, OpenCode, or Grok, then inspect any recorded or
+  configured model. Model identities stay scoped to their CLI.
+- Select **5h, 7h, 24h, 7d, 30d, 90d, or All time**. Short ranges use hourly
+  buckets; longer ranges use daily UTC buckets, grouped for large histories.
+- Explore token input, output, cache reads, reported cost, usage events, and
+  OpenCode steps. Missing measurements display a dash or an explanation.
+- Use Models to search and inspect a model; Harness activity shows the latest
+  retained Harness turns separately from CLI-wide accounting. Limits & budgets
+  preserves account quota observation times and configured billing windows.
+- Setup, sign-in, installation, and plugin updates remain under Host management.
+  The standalone page retains an HTML fallback and refreshes the enhanced view
+  in place without losing filters or scroll position.
+
+Codex token history uses timestamped cumulative-usage deltas, deduplicates repeated
+snapshots, and preserves the model active at each event. A short range excludes
+older usage even when its session remains active. When timestamped history cannot
+account for the full total, the view labels its session-based approximation.
+Grok's model accounting is session-based and is grouped by last activity.
+OpenCode reports whole-day totals and daily steps, so exact hourly or per-model
+token history is unavailable. Its short-range totals explicitly name their actual
+scope. Subscription quota and budget windows do not change with usage filters.
+
+Edit `src/dashboard.tsx`, `src/usage-data.js`, `src/dashboard.css`, and
+`src/tokens.css` for the shared UI; `src/host-client.js` owns Harness loading,
+access, and management actions. `scripts/build.mjs` bundles coss ui/Base UI and
+Recharts, scopes styles to `.dsh-dashboard`, and generates `client.js` plus `dist/`.
+Run `npm run build` after source changes. `npm pack` builds automatically.
 
 | Suite | Covers |
 | --- | --- |
