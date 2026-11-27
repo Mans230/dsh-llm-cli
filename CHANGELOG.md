@@ -6,8 +6,14 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.2]
+
 ### Fixed
 
+- Stream Grok's native `thought` events as reasoning in Harness before the
+  answer text arrives.
+- Let signed-in Harness owners check for plugin updates remotely, while
+  keeping update installation host-only.
 - Resolve the hosted JSX runtime and React DOM from Harness alongside React;
   cover React 18.3.1 and React 19 hosts in Chromium and CI.
 - Keep Codex context-full markers out of measured usage, isolate approximate
