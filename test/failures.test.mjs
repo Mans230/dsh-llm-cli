@@ -23,13 +23,16 @@ setCli(
   'opencode.mjs',
   `process.stdout.write(JSON.stringify({
      type: 'error',
-     error: { type: 'provider.quota', message: 'Rate limit exceeded. Please try again later.', status: 429 },
+      error: { type: 'provider.quota', message: 'Rate limit exceeded. Please try again later.', status: 429, retryAfterMs: 60000 },
    }) + '\\n')
    process.exit(0)`,
 )
 const quota = await drain(adapter, turn('opencode', 'opencode/free'))
 assertMatch(quota.error ?? '', /Rate limit exceeded/, 'the provider message reaches the caller')
 assertMatch(quota.error ?? '', /HTTP 429/, 'the HTTP status reaches the caller')
+assertMatch(quota.error ?? '', /Retry after \d{4}-/, 'the provider retry time reaches the caller')
+assertEqual(adapter.ledger.summary().recent[0].failureCode,'rate-limit','rate limits are distinguishable in the dashboard data')
+assert(adapter.ledger.summary().recent[0].retryAt > Date.now(),'provider retry time is recorded')
 assertEqual(textOf(quota), '', 'an error event is not passed off as a reply')
 assertEqual(adapter.ledger.summary().recent[0].ok, false, 'the failed turn is ledgered as a failure')
 
@@ -37,6 +40,7 @@ assertEqual(adapter.ledger.summary().recent[0].ok, false, 'the failed turn is le
 setCli('grok.mjs', `process.stdout.write(JSON.stringify({ type: 'error', message: 'weekly limit reached (HTTP 429)' }) + '\\n')`)
 const grokError = await drain(adapter, turn('grok', 'grok-4.7'))
 assertMatch(grokError.error ?? '', /weekly limit reached/, 'a grok error event is surfaced')
+assertEqual(adapter.ledger.summary().recent[0].failureCode,'quota','subscription quota is distinguishable from throttling')
 
 // --- 3. A CLI that streams text and then hangs must not read as a finished answer.
 setCli(
