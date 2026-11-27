@@ -187,23 +187,16 @@ function defaultRoutes() {
  * subscription quota, no remaining-request count and no reset time, so no
  * "remaining" figure exists to report.
  */
-function readGrokModelLimits() {
-  const file = profilePath('.grok', 'models_cache.json')
+function readGrokModelLimits(file = profilePath('.grok', 'models_cache.json')) {
   if (!file || !existsSync(file)) return {}
   try {
     const parsed = JSON.parse(readFileSync(file, 'utf8'))
-    const limits = {}
+    const limits = Object.create(null)
     for (const [id, entry] of Object.entries(parsed?.models ?? {})) {
       const info = entry?.info ?? {}
-      const windows = Array.isArray(info.context_windows)
-        ? info.context_windows.filter((value) => typeof value === 'number' && value > 0)
-        : []
-      const primary =
-        typeof info.context_window === 'number' && info.context_window > 0
-          ? info.context_window
-          : windows[0]
       limits[id] = {
-        contextWindow: primary,
+        providerContextWindow: Number.isSafeInteger(info.context_window) && info.context_window > 0
+          ? info.context_window : undefined,
         maxOutputTokens:
           typeof info.max_completion_tokens === 'number' && info.max_completion_tokens > 0
             ? info.max_completion_tokens
@@ -1679,6 +1672,7 @@ class CliAdapter {
         (nativeContext ? (cap && !preserveFree ? Math.min(cap, nativeContext) : nativeContext) : DEFAULT_CONTEXT_WINDOW)
       return {
         contextWindow,
+        providerContextWindow: nativeContext,
         maxOutputTokens: configuredMax ?? (native?.maxOutputTokens > 0 ? native.maxOutputTokens : undefined),
         source: configuredContext !== undefined ? 'configured for this model'
           : route?.contextWindow ? 'configured for this route'
@@ -1695,6 +1689,7 @@ class CliAdapter {
         : undefined
       return {
         contextWindow: configuredContext ?? catalogContext ?? route?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+        providerContextWindow: catalogContext !== undefined ? window : undefined,
         ...maxField,
         source:
           configuredContext !== undefined
@@ -1716,24 +1711,22 @@ class CliAdapter {
     }
     const now = Date.now()
     if (!this.limitsCache || now - this.limitsCache.at > LIMITS_TTL_MS) {
-      this.limitsCache = { at: now, byModel: readGrokModelLimits() }
+      this.limitsCache = { at: now, byModel: readGrokModelLimits(route?.modelsCacheFile) }
     }
     const byModel = this.limitsCache.byModel
     const found = byModel[model]
-    if (found) {
-      return configuredContext === undefined
-        ? { ...found, ...maxField }
-        : { ...found, contextWindow: configuredContext, ...maxField, source: 'configured for this model' }
-    }
     return {
-      contextWindow: configuredContext ?? route?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      ...found,
+      contextWindow: configuredContext ?? found?.providerContextWindow ?? route?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
       ...maxField,
       source:
         configuredContext !== undefined
           ? 'configured for this model'
-          : Object.keys(byModel).length === 0
+          : found?.providerContextWindow ? found.source
+            : route?.contextWindow ? 'configured for this route'
+            : Object.keys(byModel).length === 0
             ? 'grok models cache unavailable: sign in with the grok CLI to refresh it'
-            : 'this model is not in the grok models cache',
+            : 'harness default: Grok cache has no default context for this exact model',
     }
   }
 
@@ -3404,6 +3397,7 @@ function renderUsageHtml(summary, generatedAt, routes, notice, cliUsage, plans, 
           `<strong>${escapeHtml(route.displayName)}</strong>`,
           escapeHtml(model.id),
           model.contextWindow ? compact(model.contextWindow) : '\u2014',
+          model.providerContextWindow ? compact(model.providerContextWindow) : '\u2014',
           model.maxOutputTokens ? compact(model.maxOutputTokens) : '\u2014',
           escapeHtml(model.source ?? ''),
         ]),
@@ -3675,7 +3669,7 @@ ${routeCards ? `<h2>Routes</h2>
 <div class="cards">${routeCards}</div>` : ''}
 ${limitRows ? `<h2>Model limits</h2>
 <div class="wrap"><table>
-<thead><tr><th>Route</th><th>Model</th><th>Context window</th><th>Max output</th><th>Source</th></tr></thead>
+<thead><tr><th>Route</th><th>Model</th><th>Harness context</th><th>Provider context</th><th>Max output</th><th>Source</th></tr></thead>
 <tbody>${limitRows}</tbody>
 </table></div>` : ''}
 ${updateSection}

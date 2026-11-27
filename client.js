@@ -932,10 +932,11 @@ window.__ModuleLoader__.load({
                 { key: route.id, style: { marginBottom: '10px' } },
                 h('div', { style: S.subheading }, route.displayName, h('span', { style: S.pill }, route.id)),
                 h(Table, {
-                  head: ['Model', 'Context window', 'Max output', 'Source'],
+                  head: ['Model', 'Harness context', 'Provider context', 'Max output', 'Source'],
                   rows: route.models.map((model) => [
                     model.id,
                     model.contextWindow ? counts(model.contextWindow) : '\u2014',
+                    model.providerContextWindow ? counts(model.providerContextWindow) : '\u2014',
                     model.maxOutputTokens ? counts(model.maxOutputTokens) : '\u2014',
                     model.source ?? '',
                   ]),
