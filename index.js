@@ -4211,10 +4211,10 @@ export function apply(ctx, config) {
       child.webServer.register({
         kind: 'exact',
         path: '/llm-cli/update.json',
-        handler: async (request, response) => {
-          // The status carries the install path and the action token, so this
-          // one never answers another machine, token or not.
-          if (!isLoopbackRequest(request)) {
+        auth: 'required',
+        handler: async (request, response, peer) => {
+          const local = isLoopbackRequest(request)
+          if (!local && !(peer?.principal?.kind === 'owner' && peer.signal?.aborted === false)) {
             response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
             response.end('llm-cli: the update endpoint answers this machine only\n')
             return
@@ -4227,7 +4227,14 @@ export function apply(ctx, config) {
           }
           const status = await updates.check({ force })
           response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-          response.end(JSON.stringify(status))
+          response.end(JSON.stringify(local ? status : {
+            current: status.current,
+            latest: status.latest,
+            updateAvailable: status.updateAvailable,
+            checkedAt: status.checkedAt,
+            canApply: false,
+            error: status.error ? 'Could not check for updates. Try again or check on the Harness host.' : undefined,
+          }))
         },
       }),
       child.webServer.register({
