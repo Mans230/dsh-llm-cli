@@ -64,6 +64,7 @@ await catalog.adapter.listModels('opencode')
 assertEqual(catalog.adapter.limitsFor('opencode','opencode/beam-free').contextWindow,1048576,'million-context free models preserve their published capacity')
 assertEqual(catalog.adapter.limitsFor('opencode','opencode/deepseek-v4.1-flash-free').contextWindow,200000,'a configured cap cannot inflate a smaller published capacity')
 assertEqual(catalog.adapter.limitsFor('opencode','opencode/deepseek-v4.1-flash').contextWindow,500000,'other catalog models use the requested 500k cap')
+assertEqual(catalog.adapter.limitsFor('opencode','opencode/deepseek-v4.1-flash').providerContextWindow,1000000,'the native OpenCode window remains available alongside the cap')
 assertEqual(catalog.adapter.limitsFor('opencode','opencode/deepseek-v4.1-flash').maxOutputTokens,384000,'output limits retain the published value')
 const codex = mount({ providers: { grok: false, opencode: false, codex: {
   bin: process.execPath, contextWindow: 200000,
@@ -78,7 +79,18 @@ writeFileSync(codexCatalog, JSON.stringify({ models: [
 codex.adapter.config.providers.codex.modelsCacheFile = codexCatalog
 assertEqual((await codex.adapter.resolveModel('codex','short')).context.contextWindow,272000,'Codex uses the exact model effective window, not its maximum')
 assertEqual(codex.adapter.limitsFor('codex','long').contextWindow,475000,'another model keeps its own window and CLI safety margin')
+assertEqual(codex.adapter.limitsFor('codex','long').providerContextWindow,500000,'the nominal Codex window is reported separately')
 assertEqual(codex.adapter.limitsFor('codex','long').source,'Codex model catalog','the source is identified')
 assertEqual(codex.adapter.limitsFor('codex','unknown').contextWindow,200000,'an unlisted model uses the route fallback')
 assertEqual(codex.adapter.limitsFor('codex','override').contextWindow,128000,'an explicit per-model override still wins')
+const grok = mount({ providers: { codex:false, opencode:false, grok:{bin:process.execPath,
+  models:[{id:'grok-4.7',contextWindow:192000}],
+} } })
+const grokCatalog = join(grok.root,'models.json')
+writeFileSync(grokCatalog, JSON.stringify({models:{'grok-4.7':{info:{context_window:256000,context_windows:[256000,500000]}},unknown:{info:{context_windows:[500000]}}}}))
+grok.adapter.config.providers.grok.modelsCacheFile = grokCatalog
+assertEqual(grok.adapter.limitsFor('grok','grok-4.7').providerContextWindow,256000,'Grok uses its published default, not the optional 500k window')
+assertEqual(grok.adapter.limitsFor('grok','grok-4.7').contextWindow,192000,'Grok retains the configured limit')
+assertEqual(grok.adapter.limitsFor('grok','grok-4.7@500k').providerContextWindow,undefined,'an unlisted Grok alias does not inherit base metadata')
+assertEqual(grok.adapter.limitsFor('grok','unknown').providerContextWindow,undefined,'optional windows alone do not establish the active provider window')
 console.log('ok  model-limits.test')
