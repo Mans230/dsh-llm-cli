@@ -1260,7 +1260,7 @@ function parseGrokLine(line) {
   if (event?.type === 'text' && typeof event.data === 'string' && event.data.length > 0) {
     return { text: event.data }
   }
-  if ((event?.type === 'thinking' || event?.type === 'reasoning') && typeof event.data === 'string') {
+  if (['thought', 'thinking', 'reasoning'].includes(event?.type) && typeof event.data === 'string') {
     return { reasoning: event.data }
   }
   if (event?.type === 'usage' && event.usage && typeof event.usage === 'object') {

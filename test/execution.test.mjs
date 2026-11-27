@@ -45,4 +45,24 @@ for await (const chunk of m.adapter.stream(turn('opencode','m'))) {
 }
 assert(sawEarly,'a text delta arrives before the child exits')
 assertEqual(readFileSync(marker,'utf8'),'exited','the child subsequently exited')
+
+const grok = mount({
+  providers: {
+    codex: false,
+    opencode: false,
+    grok: {
+      bin: process.execPath,
+      buildArgs: () => ['-e', `
+        console.log(JSON.stringify({ type: 'thought', data: 'Checking' }));
+        console.log(JSON.stringify({ type: 'text', data: 'Answer' }));
+      `],
+    },
+  },
+})
+const grokReply = await drain(grok.adapter, turn('grok', 'grok-4.7'))
+assertEqual(grokReply.error, null, 'the Grok turn completes successfully')
+const grokDeltas = grokReply.chunks.filter(chunk => ['reasoning-delta', 'text-delta'].includes(chunk.type))
+assertEqual(grokDeltas[0]?.type, 'reasoning-delta', 'Grok native thought events surface before the answer')
+assertEqual(grokDeltas[0]?.text, 'Checking', 'Grok reasoning is preserved as its own delta')
+assertEqual(textOf(grokReply), 'Answer', 'Grok reasoning stays separate from the answer')
 console.log('ok  execution.test')
