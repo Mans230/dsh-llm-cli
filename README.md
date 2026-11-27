@@ -177,6 +177,26 @@ updating so it loads the new package.
 | `GET /llm-cli/setup.json` | Read CLI setup status directly from the host. |
 | `POST /llm-cli/setup` and `POST /llm-cli/update` | Run a host-only setup action or apply a plugin update. |
 
+### Behind nginx
+
+For each Harness profile served by nginx, configure Harness's `--public-url`
+with the HTTPS URL users open and `--trusted-host` with that URL's hostname
+(include a non-default port if used). Proxy the Harness UI, WebSocket upgrades,
+and `/llm-cli/` requests to the same profile. Preserve the original `Host`,
+the `X-Forwarded-*` headers, and the browser's cookies. Use the same origin
+for the Harness UI and dashboard.
+
+1. Sign in as the Harness owner at the proxied URL.
+2. Open **Settings → LLM usage** or `/llm-cli/usage` on that same origin.
+   When Harness passes the owner session to the plugin, no separate dashboard
+   token is needed in any profile. Normal Harness sign-in still applies.
+
+This was verified with Harness `0.2.3-alpha.2` and two separate profiles
+behind nginx. Harness `0.2.1-rc.5` doesn't pass the owner session to plugin
+routes. On that version, updating only the plugin still leaves the dashboard
+returning `403` through nginx. Upgrade Harness as well, or configure
+`dashboardToken` in each affected profile as a fallback.
+
 ## Troubleshooting
 
 | Symptom | Check |
@@ -185,6 +205,7 @@ updating so it loads the new package.
 | A CLI is missing or signed out | Run the CLI under the Harness process account or check **Host management** on the host. Complete any device sign-in and verify the status there. On Windows, an explicit `bin` can point to the CLI's actual executable if its shim can't be resolved. |
 | A model doesn't appear or is rejected | Check the exact ID and available models in the installed CLI. A profile's pinned `models` list overrides discovery. |
 | Remote usage or the version check returns `401` or `403` | Sign in as the Harness owner and confirm the plugin build supports remote version checks. Older hosts may need a dashboard token for usage reads. Remote setup and installation are expected to be refused. |
+| The dashboard behind nginx says it needs a `dashboardToken` | See [Behind nginx](#behind-nginx). Check both the Harness and plugin versions; an older Harness can require the token even when the owner is signed in. |
 | A chart is empty or a number looks different from the CLI | Compare the same source, model, and date range. Check the displayed scope and whether that CLI reports the metric. Refresh if you just ran a turn. |
 
 Report reproducible problems in [GitHub Issues](https://github.com/Mans230/dsh-llm-cli/issues).
