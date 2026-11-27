@@ -178,9 +178,9 @@ function fakeResponse() {
     },
   }
 }
-const call = async (route, request) => {
+const call = async (route, request, peer) => {
   const response = fakeResponse()
-  await route.handler(request, response)
+  await route.handler(request, response, peer)
   return response
 }
 const statusRoute = updateRoutes.find((route) => route.path === '/llm-cli/update.json')
@@ -194,7 +194,16 @@ const request = (url, { address = '127.0.0.1', method = 'GET', headers = {}, bod
 })
 
 const rejected = await call(statusRoute, request('/llm-cli/update.json', { address: '10.0.0.9' }))
-assertEqual(rejected.status, 403, 'the update status never answers another machine')
+assertEqual(rejected.status, 403, 'unauthenticated remote callers cannot check for updates')
+const owner = { principal: { kind: 'owner' }, signal: new AbortController().signal }
+const ownerCheck = await call(statusRoute, request('/llm-cli/update.json?force=1', { address: '10.0.0.9' }), owner)
+assertEqual(ownerCheck.status, 200, 'a signed-in remote owner can check the published version')
+const publicStatus = JSON.parse(ownerCheck.body)
+assertEqual(publicStatus.latest, '9.9.9', 'remote status carries the published version')
+assertEqual(publicStatus.canApply, false, 'remote checks do not offer installation')
+for (const key of ['actionToken', 'install', 'source', 'note', 'lastResult']) {
+  assert(!Object.hasOwn(publicStatus, key), `remote status omits ${key}`)
+}
 
 const status = await call(statusRoute, request('/llm-cli/update.json?force=1'))
 assertEqual(status.status, 200, 'a loopback status request is served')
@@ -216,6 +225,7 @@ const remoteApply = await call(
     headers: { accept: 'application/json', 'x-llm-cli-update': payload.actionToken },
     body: '',
   }),
+  owner,
 )
 assertEqual(remoteApply.status, 403, 'even the right token does not let another machine update')
 
